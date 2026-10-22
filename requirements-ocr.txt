@@ -1,0 +1,5 @@
+# Optional, heavy: high-accuracy OCR for scans/photos (CPU). Tesseract or an Ollama vision model also work.
+paddleocr>=3.0
+paddlepaddle>=3.0
+opencv-python-headless>=4.9
+numpy

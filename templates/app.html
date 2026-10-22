@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DocuMind AI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <script>try{var t=localStorage.getItem("dm-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="#/dashboard">
+      <div class="brand-logo"><svg class="icon" viewBox="0 0 24 24"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 13h6M9 17h4"/></svg></div>
+      <div style="color:var(--text)">DocuMind AI<small>Document intelligence</small></div>
+    </a>
+    <nav class="nav" id="nav">
+      <a href="#/dashboard" data-route="dashboard"><svg class="icon" data-i="dashboard"></svg>Dashboard</a>
+      <a href="#/upload" data-route="upload"><svg class="icon" data-i="upload"></svg>Upload<span class="count" id="navUploads" hidden>0</span></a>
+      <a href="#/documents" data-route="documents"><svg class="icon" data-i="files"></svg>Documents<span class="count" id="navDocs">0</span></a>
+      <div class="nav-label">Account</div>
+      <a href="#/settings" data-route="settings"><svg class="icon" data-i="settings"></svg>Settings</a>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="ollama-pill" id="ollamaPill" title="Ollama connection" role="button" tabindex="0">
+        <span class="dot wait pulse"></span>
+        <div style="min-width:0"><b>Ollama</b><span id="ollamaText">Checking…</span></div>
+      </div>
+      <div class="user-card">
+        <div class="avatar" id="avatar"></div>
+        <div class="who"><b id="userName"></b><span id="userEmail"></span></div>
+        <button class="btn ghost sm icon-only" id="logoutBtn" title="Sign out" aria-label="Sign out"><svg class="icon sm" data-i="logout"></svg></button>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="btn ghost icon-only menu-btn" id="menuBtn" aria-label="Menu"><svg class="icon" data-i="menu"></svg></button>
+      <form class="search input-icon" id="searchForm" role="search">
+        <svg class="icon sm" data-i="search"></svg>
+        <input class="input" id="searchInput" placeholder="Search documents…" aria-label="Search documents">
+      </form>
+      <div class="spacer"></div>
+      <button class="btn ghost icon-only" id="themeBtn" aria-label="Toggle theme"><svg class="icon" data-i="moon"></svg></button>
+      <a class="btn primary" href="#/upload"><svg class="icon sm" data-i="upload"></svg><span>Upload</span></a>
+    </header>
+    <main class="content" id="view" tabindex="-1"></main>
+  </div>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script>window.DM_USER = {{ user | tojson }};</script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
