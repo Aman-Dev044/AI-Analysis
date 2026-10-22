@@ -96,7 +96,8 @@
   }
   function fileKind(ext) {
     ext = (ext || "").replace(".", "").toLowerCase();
-    if (["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"].indexOf(ext) >= 0) return "img";
+    if (["png", "jpg", "jpeg", "svg", "bmp", "tif", "tiff", "webp"].indexOf(ext) >= 0) return "img";
+    if (ext === "doc") return "docx";
     return ext || "txt";
   }
   function fileIcon(ext) {
@@ -391,7 +392,7 @@
     uploadOpts.length = uploadOpts.length || prefs.length || "standard";
     uploadOpts.language = uploadOpts.language || prefs.language;
     view.innerHTML =
-      '<div class="page-head"><div><h1>Upload documents</h1><p>PDF, Word, text, CSV and images — up to ' + m.max_upload_mb + " MB each. Multiple files supported.</p></div></div>" +
+      '<div class="page-head"><div><h1>Upload documents</h1><p>PDF, Word (.doc/.docx), text, CSV, images (JPG, PNG, SVG…) — up to ' + m.max_upload_mb + " MB each. Multiple files supported.</p></div></div>" +
       '<div class="grid g-main">' +
       '<div class="grid" style="align-content:start">' +
       '<div class="dropzone" id="dz" tabindex="0" role="button" aria-label="Choose files to upload">' +

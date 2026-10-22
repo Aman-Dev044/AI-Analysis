@@ -1,6 +1,6 @@
 # DocuMind AI — Flask document summariser
 
-Upload PDFs, Word files, text/CSV, scans and photos and get beautifully formatted
+Upload PDF, Word (.doc / .docx), TXT, Markdown, CSV, images (JPG, JPEG, PNG, SVG, BMP, TIFF, WEBP) and get beautifully formatted
 summaries from **your own Ollama server** (local or VPS). Every date, deadline,
 amount and percentage is highlighted, critical items are underlined, and each
 upload shows live, stage-by-stage progress while the summary is written.
@@ -21,7 +21,10 @@ upload shows live, stage-by-stage progress while the summary is written.
   **work-plan card** (today's focus, routine with the current slot highlighted, this week, month & quarter goals)
   for structured plans like `Period: … / YEAR n / QUARTER n / MONTH n` text files or date/activity CSV schedules.
 - **Long documents** — automatic map-reduce chunking so large files fit the model context.
-- **OCR** for images and scanned PDF pages: PaddleOCR, Tesseract, or an Ollama vision model (auto-fallback).
+- **OCR** for photos, scans and scanned PDF pages — RapidOCR (pip-installed, works out of the box), with
+  PaddleOCR, Tesseract or an Ollama vision model as alternatives (auto-fallback).
+- **Legacy .doc** read in pure Python (Word piece table); falls back to `antiword` / LibreOffice if present.
+  **SVG** text is read directly, or the drawing is rendered and OCR'd when it has no text layer.
 - Auth (login / signup, hashed passwords), per-user isolation, light/dark theme, mobile layout.
 
 ## Quick start
@@ -55,7 +58,7 @@ Seeded login (from `.env`): `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` — chang
 | `OLLAMA_API_KEY` | empty | optional Bearer token for a reverse proxy |
 | `OLLAMA_NUM_CTX`, `OLLAMA_TIMEOUT_SECONDS` | `8192`, `600` | context window and request timeout |
 | `OLLAMA_VISION_MODEL` | empty | e.g. `qwen2.5vl:3b` for OCR via Ollama |
-| `OCR_ENGINE`, `TESSERACT_CMD` | `auto` | `auto`, `paddle`, `tesseract`, `ollama`, `off` |
+| `OCR_ENGINE`, `TESSERACT_CMD` | `auto` | `auto` (rapid → paddle → tesseract → ollama), or one of `rapid`, `paddle`, `tesseract`, `ollama`, `off` |
 | `CHUNK_CHARS`, `MAX_CHUNKS` | `12000`, `40` | long-document chunking |
 | `MAX_UPLOAD_MB`, `WORKERS` | `25`, `2` | upload limit, parallel background jobs |
 | `SEED_ADMIN_*` | | seeded login |
@@ -72,7 +75,7 @@ app.py                 Flask routes: pages, auth, documents, summaries, chat, da
 config.py / db.py      settings, MongoDB access, file storage, seeding
 seed.py                one-off DB init + admin login
 services/
-  extractor.py         PDF / DOCX / TXT / CSV / image text extraction + OCR engines
+  extractor.py         PDF / DOC / DOCX / TXT / CSV / SVG / image text extraction + OCR engines
   insights.py          deterministic dates, expiry, amounts, contacts, doc type
   plan.py              work-plan & schedule understanding for the dashboard
   summarizer.py        prompts, styles, map-reduce, document Q&A

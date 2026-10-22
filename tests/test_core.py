@@ -5,7 +5,7 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services import insights, plan, summarizer  # noqa: E402
+from services import extractor, insights, plan, summarizer  # noqa: E402
 from services.ollama_client import strip_thinking  # noqa: E402
 
 PLAN = """THREE-YEAR WORK SCHEDULE
@@ -76,6 +76,17 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(summarizer.clean_markdown("```markdown\n# Hi\n```"), "# Hi")
         self.assertEqual(strip_thinking("<think>x</think>Answer"), "Answer")
         self.assertEqual(strip_thinking("Partial <think>still thinking"), "Partial ")
+
+
+class ExtractorTests(unittest.TestCase):
+    def test_word_binary_text_cleanup(self):
+        raw = "Title\rName\x07Aman\x07\x07Fee\x07₹500\x07\x07\x13 HYPERLINK \"x\" \x14site\x15 end"
+        self.assertEqual(extractor._clean_word_text(raw), "Title\nName | Aman\nFee | ₹500\nsite end")
+
+    def test_svg_text_fallback(self):
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg"><text x="1" y="9">Due 30 November 2026</text></svg>'
+        result = extractor.extract(svg, ".svg", lambda *_: None)
+        self.assertIn("30 November 2026", result.text)
 
 
 if __name__ == "__main__":

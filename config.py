@@ -49,7 +49,7 @@ class Config:
     CHUNK_CHARS = _int("CHUNK_CHARS", 12000)  # text per model call before map-reduce
     MAX_CHUNKS = _int("MAX_CHUNKS", 40)
 
-    # OCR: auto | paddle | tesseract | ollama | off
+    # OCR: auto | rapid | paddle | tesseract | ollama | off
     OCR_ENGINE = os.getenv("OCR_ENGINE", "auto").strip().lower()
     TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")
 
@@ -61,6 +61,6 @@ class Config:
     SEED_ADMIN_PASSWORD = os.getenv("SEED_ADMIN_PASSWORD", "Admin@12345")
 
     ALLOWED_EXTENSIONS = {
-        ".pdf", ".docx", ".txt", ".md", ".csv",
-        ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp",
+        ".pdf", ".doc", ".docx", ".txt", ".md", ".csv",
+        ".png", ".jpg", ".jpeg", ".svg", ".bmp", ".tif", ".tiff", ".webp",
     }
