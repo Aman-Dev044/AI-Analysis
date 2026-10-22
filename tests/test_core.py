@@ -74,6 +74,10 @@ class SummarizerTests(unittest.TestCase):
 
     def test_clean_markdown_and_thinking(self):
         self.assertEqual(summarizer.clean_markdown("```markdown\n# Hi\n```"), "# Hi")
+        self.assertEqual(
+            summarizer.clean_markdown("**TL;DR:** A licence.\n\n###Key points\n- a\n##\n### TL;DR\nBody"),
+            "A licence.\n\n### Key points\n- a\n\nBody",
+        )
         self.assertEqual(strip_thinking("<think>x</think>Answer"), "Answer")
         self.assertEqual(strip_thinking("Partial <think>still thinking"), "Partial ")
 

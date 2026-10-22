@@ -160,7 +160,8 @@
     while ((n = walker.nextNode())) nodes.push(n);
     var combined = new RegExp("(" + DATE_RX.source + ")|(" + MONEY_RX.source + ")|(" + PCT_RX.source + ")", "gi");
     nodes.forEach(function (node) {
-      var text = node.nodeValue, m, last = 0, frag = null;
+      var text = stripMarkers(node.nodeValue), m, last = 0, frag = null;
+      if (text !== node.nodeValue) node.nodeValue = text;
       combined.lastIndex = 0;
       while ((m = combined.exec(text))) {
         if (!frag) frag = document.createDocumentFragment();
@@ -174,8 +175,28 @@
       if (frag) { frag.appendChild(document.createTextNode(text.slice(last))); node.parentNode.replaceChild(frag, node); }
     });
   }
-  function renderMD(md) {
-    md = String(md || "");
+  var TLDR_RX = /^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*|__)?[ \t]*TL[ \t]*;?[ \t]*DR[ \t]*(?:\*\*|__)?[ \t]*[:\-–—]?[ \t]*(?:\*\*|__)?[ \t]*/gim;
+
+  // Small models (and half-streamed text) produce broken Markdown; normalise it before rendering.
+  function tidyMD(md, streaming) {
+    md = String(md || "").replace(TLDR_RX, "");
+    md = md.replace(/^(#{1,6})([^#\s])/gm, "$1 $2").replace(/^[ \t]*#{1,6}[ \t]*$/gm, "");
+    if (streaming) {
+      md = md.replace(/[*_#\s]+$/, "");                        // half-typed markers at the very end
+      if ((md.match(/\*\*/g) || []).length % 2) md += "**";    // close an open bold while it streams
+    }
+    return md;
+  }
+  // Last line of defence: no literal **, __ or heading hashes may reach the reader.
+  function stripMarkers(text) {
+    return text
+      .replace(/\*{2,}|_{2,}/g, "")
+      .replace(/(^|\s)\*(?=\S)|(\S)\*(?=\s|$)/g, "$1$2")
+      .replace(/(^|\s)#{1,6}(?=\s|$)/g, "$1");
+  }
+
+  function renderMD(md, streaming) {
+    md = tidyMD(md, streaming);
     var html;
     if (window.marked) {
       html = window.marked.parse(md, { gfm: true, breaks: false });
@@ -514,28 +535,72 @@
       box.innerHTML = '<div class="empty">' + icon("files") + "<p>Your uploads will appear here with live progress.</p></div>";
       return;
     }
-    box.innerHTML = S.uploads.map(function (u) {
+    var empty = $(".empty", box);
+    if (empty) empty.remove();
+    $$(".job", box).forEach(function (el) {
+      if (!S.uploads.some(function (u) { return u.lid === el.dataset.lid; })) el.remove();
+    });
+    // Update each job card in place so scroll position and animations survive every poll.
+    S.uploads.forEach(function (u, idx) {
+      var el = $('.job[data-lid="' + u.lid + '"]', box);
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "job";
+        el.dataset.lid = u.lid;
+        el.innerHTML = '<div data-slot="top"></div><div class="bar" style="margin-top:12px"><i></i></div><div data-slot="status"></div><div data-slot="preview"></div><div data-slot="extra"></div>';
+      }
+      if (box.children[idx] !== el) box.insertBefore(el, box.children[idx] || null);
+
       var uploading = u.stage === "uploading", done = u.stage === "ready", failed = u.stage === "failed";
       var pct = uploading ? Math.round(u.uploadPct * 0.08) : (done ? 100 : u.progress);
       var right = done ? '<a class="btn sm primary" href="#/doc/' + u.docId + '">Open ' + icon("external", "sm") + "</a>" :
         failed ? '<span class="badge bad">Failed</span>' : '<span class="badge primary"><span class="dot pulse"></span>' + (uploading ? u.uploadPct + "% uploaded" : pct + "%") + "</span>";
-      var preview = "";
-      if (u.summary && (u.summary.content || u.summary.status === "running")) {
-        var live = u.summary.status === "running";
-        preview = '<div class="preview"><div class="preview-label">' + (live ? '<span class="loader" style="width:12px;height:12px;border-width:2px"></span>Writing summary live' : icon("sparkles", "sm") + "Summary preview") +
-          '</div><div class="md' + (live ? " cursor" : "") + '" style="font-size:13.5px">' + (u.summary.content ? renderMD(u.summary.content) : '<p class="muted">Waiting for the first words…</p>') + "</div></div>";
-      }
-      if (done && u.summaryFailed && u.summary && u.summary.error) {
-        preview += '<div class="error-box">' + icon("alert", "sm") + "<span>Summary failed: " + esc(u.summary.error) + "</span></div>";
-      }
-      return '<div class="job"><div class="job-top">' + fileIcon(u.ext) + '<div style="flex:1;min-width:0"><b style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(u.name) + '</b><span class="muted" style="font-size:12px">' +
-        fmtSize(u.size) + (u.docType ? " · " + esc(u.docType) : "") + "</span></div>" + right + "</div>" +
-        (failed ? "" : '<div class="bar ' + (done ? "ok" : "live") + '" style="margin-top:12px"><i style="width:' + (uploading ? u.uploadPct : pct) + '%"></i></div>') +
-        stepper(u.stage, u.failedAt || 0) +
+      setHTML(slot(el, "top"), '<div class="job-top">' + fileIcon(u.ext) + '<div style="flex:1;min-width:0"><b style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(u.name) + '</b><span class="muted" style="font-size:12px">' +
+        fmtSize(u.size) + (u.docType ? " · " + esc(u.docType) : "") + "</span></div>" + right + "</div>");
+
+      var bar = $(".bar", el);
+      bar.hidden = failed;
+      bar.className = "bar " + (done ? "ok" : "live");
+      $("i", bar).style.width = (uploading ? u.uploadPct : pct) + "%";
+
+      setHTML(slot(el, "status"), stepper(u.stage, u.failedAt || 0) +
         '<div class="job-msg"><span>' + (done ? "<b>Done.</b> " : "") + esc(u.message || "") + "</span><span>" + (uploading ? "" : pct + "%") + "</span></div>" +
-        (failed ? '<div class="error-box">' + icon("alert", "sm") + "<span>" + esc(u.error || "Failed") + "</span></div>" : "") +
-        preview + "</div>";
-    }).join("");
+        (failed ? '<div class="error-box">' + icon("alert", "sm") + "<span>" + esc(u.error || "Failed") + "</span></div>" : ""));
+
+      updatePreview(slot(el, "preview"), u.summary);
+      setHTML(slot(el, "extra"), done && u.summaryFailed && u.summary && u.summary.error
+        ? '<div class="error-box">' + icon("alert", "sm") + "<span>Summary failed: " + esc(u.summary.error) + "</span></div>" : "");
+    });
+  }
+
+  function slot(el, name) { return $('[data-slot="' + name + '"]', el); }
+  function setHTML(el, html) {
+    if (el._html !== html) { el.innerHTML = html; el._html = html; }
+  }
+  function nearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 48; }
+
+  // Live summary preview: re-render only when text changes, keep the reader's scroll position,
+  // and follow new text only while the reader is already at the bottom.
+  function updatePreview(holder, s) {
+    if (!s || !(s.content || s.status === "running")) { setHTML(holder, ""); return; }
+    var live = s.status === "running";
+    var key = live + "|" + (s.content || "");
+    if (holder._key === key) return;
+    holder._key = key;
+    var pv = $(".preview", holder);
+    if (!pv) {
+      holder.innerHTML = '<div class="preview"><div class="preview-label"></div><div class="md" style="font-size:13.5px"></div></div>';
+      holder._html = null;
+      pv = $(".preview", holder);
+    }
+    var follow = nearBottom(pv);
+    $(".preview-label", pv).innerHTML = live
+      ? '<span class="loader" style="width:12px;height:12px;border-width:2px"></span>Writing summary live'
+      : icon("sparkles", "sm") + "Summary preview";
+    var md = $(".md", pv);
+    md.className = "md" + (live ? " cursor" : "");
+    md.innerHTML = s.content ? renderMD(s.content, live) : '<p class="muted">Waiting for the first words…</p>';
+    if (live && follow) pv.scrollTop = pv.scrollHeight;
   }
 
   // ================================================================== DOCUMENTS
@@ -612,14 +677,14 @@
   function renderProcessing(view, doc) {
     view.innerHTML = docHeader(doc) +
       '<section class="card card-pad" style="max-width:820px"><h3 style="margin:0 0 4px">Processing your document…</h3><p class="muted" style="margin:0">You can leave this page — processing continues in the background.</p>' +
-      '<div id="procBox"></div></section>';
+      '<div id="procBox"><div class="bar live" style="margin-top:18px"><i></i></div><div data-slot="status"></div><div data-slot="preview"></div></div></section>';
     bindHeader(doc);
     var paint = function (s) {
       var box = $("#procBox"); if (!box) return;
-      var sum = s.summary;
-      box.innerHTML = '<div class="bar live" style="margin-top:18px"><i style="width:' + s.progress + '%"></i></div>' + stepper(s.stage) +
-        '<div class="job-msg"><span>' + esc(s.stage_message || "") + "</span><span>" + s.progress + "%</span></div>" +
-        (sum && sum.content ? '<div class="preview" style="max-height:none"><div class="preview-label"><span class="loader" style="width:12px;height:12px;border-width:2px"></span>Writing summary live</div><div class="md cursor">' + renderMD(sum.content) + "</div></div>" : "");
+      $(".bar i", box).style.width = (s.progress || 0) + "%";
+      setHTML(slot(box, "status"), stepper(s.stage) +
+        '<div class="job-msg"><span>' + esc(s.stage_message || "") + "</span><span>" + (s.progress || 0) + "%</span></div>");
+      updatePreview(slot(box, "preview"), s.summary);
     };
     paint(doc);
     every(900, async function () {
@@ -804,7 +869,7 @@
       D.current = null;
       $("#outTitle").textContent = "No summary yet";
       $("#outMeta").textContent = "";
-      out.innerHTML = '<div class="empty">' + icon("sparkles") + "<p>Choose a style above and click <b>Generate</b> to create your first summary.</p></div>";
+      setHTML(out, '<div class="empty">' + icon("sparkles") + "<p>Choose a style above and click <b>Generate</b> to create your first summary.</p></div>");
       return;
     }
     D.current = D.doc.summaries.find(function (s) { return s.id === id; });
@@ -846,9 +911,9 @@
         '<br><span style="color:var(--text-2)">Check the Ollama connection in Settings, then try Generate again.</span></div></div>';
     }
     if (s.instructions) html += '<blockquote class="md" style="font-size:13px;margin:0 0 16px;padding:10px 14px;border-left:3px solid var(--primary);background:var(--primary-soft);border-radius:0 8px 8px 0"><b>Custom:</b> ' + esc(s.instructions) + "</blockquote>";
-    html += s.content ? '<div class="md' + (running ? " cursor" : "") + '">' + renderMD(s.content) + "</div>" :
+    html += s.content ? '<div class="md' + (running ? " cursor" : "") + '">' + renderMD(s.content, running) + "</div>" :
       running ? '<div class="grid" style="gap:10px"><div class="skeleton" style="height:22px;width:60%"></div><div class="skeleton" style="height:14px"></div><div class="skeleton" style="height:14px;width:92%"></div><div class="skeleton" style="height:14px;width:80%"></div></div>' : "";
-    out.innerHTML = html;
+    setHTML(out, html);
   }
 
   // ------------------------------------------------------------------ side tabs
@@ -932,17 +997,19 @@
     var log = $("#chatLog"); if (!log) return;
     $("#suggest").hidden = D.chat.length > 0;
     if (!D.chat.length) {
-      log.innerHTML = '<div class="empty">' + icon("chat") + "<p>Ask a question — the AI answers using only this document.</p></div>";
+      setHTML(log, '<div class="empty">' + icon("chat") + "<p>Ask a question — the AI answers using only this document.</p></div>");
       return;
     }
-    log.innerHTML = D.chat.map(function (m) {
+    var follow = nearBottom(log) || log._count !== D.chat.length; // stay put while the reader scrolls back
+    log._count = D.chat.length;
+    setHTML(log, D.chat.map(function (m) {
       if (m.role === "user") return '<div class="msg user">' + esc(m.content) + "</div>";
       var running = m.status === "queued" || m.status === "running";
       var inner = m.status === "failed" ? '<span style="color:var(--bad)">' + esc(m.error || "Failed") + "</span>" :
-        m.content ? '<div class="md' + (running ? " cursor" : "") + '">' + renderMD(m.content) + "</div>" : '<span class="row muted"><span class="loader" style="width:14px;height:14px;border-width:2px"></span>Thinking…</span>';
+        m.content ? '<div class="md' + (running ? " cursor" : "") + '">' + renderMD(m.content, running) + "</div>" : '<span class="row muted"><span class="loader" style="width:14px;height:14px;border-width:2px"></span>Thinking…</span>';
       return '<div class="msg assistant">' + inner + "</div>";
-    }).join("");
-    log.scrollTop = log.scrollHeight;
+    }).join(""));
+    if (follow) log.scrollTop = log.scrollHeight;
   }
   async function sendChat(text) {
     text = (text || "").trim();

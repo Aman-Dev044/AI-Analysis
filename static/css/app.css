@@ -436,8 +436,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .auth-art p { opacity: .9; max-width: 460px; font-size: 15.5px; }
 .feat { display: grid; gap: 12px; margin-top: 26px; max-width: 460px; }
 .feat div { display: flex; gap: 12px; align-items: center; background: rgba(255,255,255,.12); padding: 12px 14px; border-radius: 12px; backdrop-filter: blur(4px); font-weight: 600; }
-.mock { background: rgba(255,255,255,.95); color: #141827; border-radius: 14px; padding: 16px 18px; max-width: 440px; box-shadow: 0 20px 50px rgba(0,0,0,.25); font-size: 13px; position: relative; z-index: 1; }
-.mock .hl-date { background: linear-gradient(transparent 55%, #fff1a8 55%); font-weight: 750; }
 .auth-form { display: grid; place-items: center; padding: 32px 20px; }
 .auth-card { width: 100%; max-width: 400px; }
 .auth-card h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -.02em; }

@@ -13,9 +13,9 @@ MODES = {
     "short": {
         "label": "Short summary",
         "icon": "zap",
-        "desc": "TL;DR in a few lines",
-        "prompt": "Write a SHORT summary: start with a one-line **TL;DR**, then one paragraph "
-                  "(3-5 sentences), then a `### Key points` list of the 3-5 most important points.",
+        "desc": "Quick overview in a few lines",
+        "prompt": "Write a SHORT summary: one overview paragraph (3-5 sentences) that says what the document "
+                  "is and its most important facts, then a `### Key points` list of the 3-5 most important points.",
     },
     "detailed": {
         "label": "Detailed summary",
@@ -95,6 +95,7 @@ LANGUAGES = ["English", "Hindi", "Hinglish", "Spanish", "French", "German", "Ara
 
 FORMAT_RULES = """FORMATTING RULES (very important):
 - Output GitHub-flavoured Markdown only. No preamble like "Here is the summary" and no closing remarks.
+- Never write labels such as "TL;DR", "Summary:" or "Note:". Always put a space after # in headings and close every ** pair.
 - Make EVERY date, deadline, time period, amount of money, percentage, quantity and key name **bold**.
 - Use <u>underline</u> (HTML u tag) for critical warnings, legal obligations, penalties, and must-do items.
 - Use > blockquotes for a single crucial takeaway or a direct important quote.
@@ -215,10 +216,20 @@ def summarize(
     return clean_markdown(result)
 
 
+_TLDR_LABEL = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*|__)?[ \t]*TL[ \t]*;?[ \t]*DR[ \t]*(?:\*\*|__)?[ \t]*[:\-–—]?[ \t]*(?:\*\*|__)?[ \t]*",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def clean_markdown(text: str) -> str:
+    """Tidy model Markdown: no code fences, no "TL;DR" labels, well-formed headings."""
     text = re.sub(r"^```(?:markdown|md)?\s*\n", "", text.strip())
     text = re.sub(r"\n```\s*$", "", text)
-    return text.strip()
+    text = _TLDR_LABEL.sub("", text)
+    text = re.sub(r"(?m)^(#{1,6})([^#\s])", r"\1 \2", text)  # "###Key" -> "### Key"
+    text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]*$", "", text)       # empty headings
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 # ------------------------------------------------------------------ chat
