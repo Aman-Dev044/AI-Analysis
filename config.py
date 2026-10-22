@@ -58,7 +58,9 @@ class Config:
 
     SEED_ADMIN_NAME = os.getenv("SEED_ADMIN_NAME", "Admin")
     SEED_ADMIN_EMAIL = os.getenv("SEED_ADMIN_EMAIL", "admin@aisummary.app")
-    SEED_ADMIN_PASSWORD = os.getenv("SEED_ADMIN_PASSWORD", "Admin@12345")
+    # Prefer the hashed form so no plain-text password sits in .env
+    SEED_ADMIN_PASSWORD_HASH = os.getenv("SEED_ADMIN_PASSWORD_HASH", "")
+    SEED_ADMIN_PASSWORD = os.getenv("SEED_ADMIN_PASSWORD", "")
 
     ALLOWED_EXTENSIONS = {
         ".pdf", ".doc", ".docx", ".txt", ".md", ".csv",

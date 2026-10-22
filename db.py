@@ -73,12 +73,15 @@ def seed_admin() -> bool:
     """Create the seeded login from .env if it does not exist. Returns True when created."""
     db = get_db()
     email = Config.SEED_ADMIN_EMAIL.strip().lower()
-    if not email or db.users.find_one({"email": email}):
+    password_hash = Config.SEED_ADMIN_PASSWORD_HASH or (
+        generate_password_hash(Config.SEED_ADMIN_PASSWORD) if Config.SEED_ADMIN_PASSWORD else ""
+    )
+    if not email or not password_hash or db.users.find_one({"email": email}):
         return False
     db.users.insert_one({
         "name": Config.SEED_ADMIN_NAME,
         "email": email,
-        "password_hash": generate_password_hash(Config.SEED_ADMIN_PASSWORD),
+        "password_hash": password_hash,
         "role": "admin",
         "prefs": {"mode": "short", "language": "English", "length": "standard", "model": None},
         "activity": [],

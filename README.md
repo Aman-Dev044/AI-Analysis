@@ -36,7 +36,9 @@ python seed.py              # creates indexes + the seeded admin login
 python app.py               # http://127.0.0.1:5000  (uses waitress)
 ```
 
-Seeded login (from `.env`): `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` — change the password from **Settings** after first login.
+Seeded login: `SEED_ADMIN_EMAIL` plus `SEED_ADMIN_PASSWORD_HASH` in `.env` — only the scrypt hash is stored,
+never the plain password. Create a hash with `python seed.py --hash`, or change the admin password directly in the
+database with `python seed.py --set-password` (users can also change it from **Settings**).
 
 ## Ollama on a VPS
 
