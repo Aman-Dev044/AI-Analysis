@@ -5,7 +5,7 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services import extractor, insights, plan, summarizer  # noqa: E402
+from services import extractor, google_calendar, insights, plan, summarizer  # noqa: E402
 from services.ollama_client import strip_thinking  # noqa: E402
 
 PLAN = """THREE-YEAR WORK SCHEDULE
@@ -91,6 +91,33 @@ class ExtractorTests(unittest.TestCase):
         svg = b'<svg xmlns="http://www.w3.org/2000/svg"><text x="1" y="9">Due 30 November 2026</text></svg>'
         result = extractor.extract(svg, ".svg", lambda *_: None)
         self.assertIn("30 November 2026", result.text)
+
+
+class GoogleCalendarTests(unittest.TestCase):
+    def test_oauth_flow_restores_pkce_code_verifier(self):
+        from unittest.mock import patch
+
+        with patch.object(google_calendar.Config, "GOOGLE_CLIENT_ID", "test-client-id"), \
+                patch.object(google_calendar.Config, "GOOGLE_CLIENT_SECRET", "test-client-secret"), \
+                patch.object(google_calendar.Config, "GOOGLE_REDIRECT_URI",
+                             "http://localhost:5000/google-calendar/callback"):
+            initial_flow = google_calendar._flow()
+            _, state = initial_flow.authorization_url()
+            callback_flow = google_calendar._flow(
+                state=state, code_verifier=initial_flow.code_verifier
+            )
+
+        self.assertTrue(initial_flow.code_verifier)
+        self.assertEqual(callback_flow.code_verifier, initial_flow.code_verifier)
+
+    def test_oauth_token_encryption_round_trip(self):
+        from cryptography.fernet import Fernet
+
+        key = Fernet.generate_key()
+        token_json = '{"refresh_token":"test-token"}'
+        encrypted = google_calendar._encrypt_token(token_json, key)
+        self.assertNotIn("test-token", encrypted)
+        self.assertEqual(google_calendar._decrypt_token(encrypted, key), token_json)
 
 
 if __name__ == "__main__":
