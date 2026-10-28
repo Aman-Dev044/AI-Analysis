@@ -100,6 +100,15 @@ def _context(text: str, start: int, end: int, width: int = 90) -> str:
     return ("…" if left > 0 and text[left - 1] != "\n" else "") + snippet
 
 
+def _event_context(text: str, start: int, end: int, limit: int = 1000) -> str:
+    """Keep the full source row for structured schedules, including trailing priority fields."""
+    left = text.rfind("\n", 0, start) + 1
+    right = text.find("\n", end)
+    if right == -1:
+        right = len(text)
+    return " ".join(text[left:right].split())[:limit]
+
+
 def _label_for(text: str, start: int) -> str:
     window = text[max(0, start - 60):start]
     best, best_pos = "mentioned", -1
@@ -130,6 +139,7 @@ def extract_dates(text: str, today: Optional[date] = None, limit: int = 80) -> l
             "ambiguous": ambiguous,
             "days_from_today": (parsed - today).days,
             "context": _context(text, match.start(), match.end()),
+            "event_context": _event_context(text, match.start(), match.end()),
         })
         if len(out) >= limit:
             break

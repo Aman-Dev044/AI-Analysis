@@ -386,6 +386,8 @@ def get_doc(user, doc_id):
     out = doc_brief(doc)
     out.update({
         "insights": doc.get("insights"),
+        "calendar_event_status": doc.get("calendar_event_status"),
+        "calendar_events": doc.get("calendar_events", []),
         "summaries": summaries,
         "plan": jobs.plan_for(doc.get("text") or "") if doc.get("is_plan") else None,
         "has_text": bool(doc.get("text")),

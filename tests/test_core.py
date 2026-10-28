@@ -94,6 +94,54 @@ class ExtractorTests(unittest.TestCase):
 
 
 class GoogleCalendarTests(unittest.TestCase):
+    def test_calendar_events_include_only_upcoming_actual_events(self):
+        events = google_calendar.build_calendar_events(
+            "doc-1",
+            "Trip notes",
+            [
+                {"iso": "2027-01-05", "context": "Team meeting on 5 January 2027 at 9:30 PM."},
+                {"iso": "2027-01-06", "context": "Travel to Jaipur on 6 January 2027."},
+                {"iso": "2027-01-07", "context": "Family get-together on 7 January 2027."},
+                {"iso": "2027-01-08", "context": "Payment deadline on 8 January 2027."},
+                {
+                    "iso": "2027-01-10",
+                    "context": "Review weekly goals and outstanding tasks",
+                    "event_context": (
+                        "2027-01-10 | Sunday | 09:00 | 09:30 | "
+                        "Review weekly goals and outstanding tasks | Planning | High | Not Started"
+                    ),
+                },
+                {
+                    "iso": "2027-01-11",
+                    "context": "Prepare routine notes",
+                    "event_context": (
+                        "2027-01-11 | Monday | 09:00 | 09:30 | Prepare routine notes | Planning | Low"
+                    ),
+                },
+                {"iso": "2026-12-01", "context": "Meeting on 1 December 2026."},
+                {"iso": "2027-01-09", "context": "Meeting on 9 January 2027.", "ambiguous": True},
+            ],
+            today=date(2027, 1, 1),
+        )
+
+        self.assertEqual(len(events), 4)
+        self.assertEqual(events[0]["start_local"], "2027-01-05T21:30")
+        self.assertNotIn("start", events[0])
+        self.assertEqual(events[1]["start"], {"date": "2027-01-06"})
+        self.assertEqual(events[1]["end"], {"date": "2027-01-07"})
+        self.assertIn("family", events[2]["summary"].lower())
+        self.assertEqual(events[3]["summary"], "High priority - Review weekly goals and outstanding tasks")
+
+    def test_calendar_event_context_preserves_full_schedule_row(self):
+        source = (
+            "2027-01-10 | Sunday | 09:00 | 09:30 | Review weekly goals and outstanding tasks"
+            " | Planning | High | Not Started"
+        )
+        info = insights.extract_dates(source, today=date(2027, 1, 1))
+
+        self.assertEqual(len(info), 1)
+        self.assertIn("| High | Not Started", info[0]["event_context"])
+
     def test_oauth_flow_restores_pkce_code_verifier(self):
         from unittest.mock import patch
 
