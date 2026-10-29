@@ -7,7 +7,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest import mock  # noqa: E402
 
-from services import brief, extractive, extractor, fields, google_calendar, insights, ollama_client, plan, rulebased, summarizer  # noqa: E402
+from services import (brief, extractive, extractor, fields, google_calendar, insights, ollama_client, plan,  # noqa: E402
+                      rulebased, summarizer, tabular)
 from services.ollama_client import strip_thinking  # noqa: E402
 
 PLAN = """THREE-YEAR WORK SCHEDULE
@@ -209,6 +210,47 @@ class ExtractiveTests(unittest.TestCase):
                          "Operating costs rose because of higher fuel charges")
         self.assertEqual(extractive.bold_owner("Anil must submit the plan."), "**Anil** must submit the plan.")
         self.assertEqual(extractive.bold_owner("It must be signed."), "It must be signed.")
+
+
+SCHEDULE = "\n".join(
+    ["Date | Day | Start | End | Task | Category | Priority"]
+    + [f"2026-11-{d:02d} | Day | {h}:00 | {h}:30 | {t} | {c} | {p}"
+       for d in range(1, 11) for h, t, c, p in ((9, "Plan the day", "Work", "High"), (18, "Evening walk", "Health", "Low"))])
+
+
+class TabularTests(unittest.TestCase):
+    def test_schedule_summary_and_answer(self):
+        table = tabular.parse(SCHEDULE)
+        self.assertIsNotNone(table)
+        md = tabular.summarize(table, title="November plan", today=date(2026, 11, 3))
+        self.assertIn("*Schedule · 20 rows · 7 columns*", md)
+        self.assertIn("**20** entries from **1 Nov 2026** to **10 Nov 2026**", md)
+        self.assertIn("Work **10** (50%)", md)
+        self.assertIn("| Plan the day | **10** |", md)
+        self.assertIn("### Coming up", md)
+        self.assertIn("**10** matching row(s).", tabular.answer(table, "how many evening walk"))
+        self.assertIsNone(tabular.parse("Hello world.\nThis is prose | with a pipe.\nAnother line."))
+
+    def test_tables_skip_prose_summaries(self):
+        md = rulebased.summarize(SCHEDULE, {}, mode="executive", title="Plan")
+        self.assertTrue(md.startswith("## Plan\n\n*Schedule"))
+
+
+class JobTests(unittest.TestCase):
+    def test_only_orphaned_stale_work_is_reaped(self):
+        from datetime import datetime, timedelta, timezone
+        from services import jobs
+        old = datetime.now(timezone.utc) - timedelta(minutes=10)
+        with mock.patch.object(jobs, "_set_doc") as save:
+            fresh = jobs.reap_document({"_id": 1, "status": "summarizing", "updated_at": datetime.now(timezone.utc)})
+            self.assertEqual(fresh["status"], "summarizing")  # still moving: another worker may own it
+            jobs._own(2)
+            owned = jobs.reap_document({"_id": 2, "status": "extracting", "updated_at": old})
+            self.assertEqual(owned["status"], "extracting")  # this server is running it
+            jobs._release(2)
+            orphan = jobs.reap_document({"_id": 3, "status": "extracting", "updated_at": old})
+            self.assertEqual(orphan["status"], "failed")
+            save.assert_called_once()
 
 
 class RuleBasedTests(unittest.TestCase):

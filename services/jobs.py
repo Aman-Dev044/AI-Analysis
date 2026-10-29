@@ -5,6 +5,7 @@ the partially-generated summary text are visible while work is running.
 """
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -14,11 +15,60 @@ from bson import ObjectId
 
 from config import Config
 from db import get_db, read_file, utcnow
-from services import extractor, fields as fields_mod, google_calendar, insights as insights_mod, plan as plan_mod, summarizer
+from services import (extractor, fields as fields_mod, google_calendar, insights as insights_mod, plan as plan_mod,
+                      summarizer, tabular)
 from services.ollama_client import OllamaError
 
 log = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=Config.WORKERS, thread_name_prefix="docjob")
+
+# Jobs this server process owns (queued or running). Anything "in progress" in the database that is not
+# owned here and has not moved for STALE_SECONDS was cut off by a crash or restart.
+_active: set = set()
+_active_lock = threading.Lock()
+STALE_SECONDS = 120
+INTERRUPTED = "Processing was interrupted (the server restarted). Use Reprocess to run it again."
+IN_PROGRESS = {"queued", "extracting", "analyzing", "summarizing", "running"}
+
+
+def _own(job_id: ObjectId):
+    with _active_lock:
+        _active.add(job_id)
+
+
+def _release(job_id: ObjectId):
+    with _active_lock:
+        _active.discard(job_id)
+
+
+def _owned(fn, job_id: ObjectId):
+    try:
+        fn(job_id)
+    finally:
+        _release(job_id)
+
+
+def _stale(record: dict) -> bool:
+    updated = record.get("updated_at") or record.get("created_at") or record.get("uploaded_at")
+    return updated is None or (utcnow() - updated).total_seconds() > STALE_SECONDS
+
+
+def reap_document(doc: dict) -> dict:
+    """Mark an orphaned in-progress document failed (in place) so the user can reprocess it."""
+    if doc.get("status") in IN_PROGRESS and doc["_id"] not in _active and _stale(doc):
+        fields = {"status": "failed", "stage": "failed", "stage_message": "Failed", "error": INTERRUPTED}
+        _set_doc(doc["_id"], **fields)
+        doc.update(fields)
+    return doc
+
+
+def reap_summary(summary: dict) -> dict:
+    if summary.get("status") in IN_PROGRESS and summary["_id"] not in _active and _stale(summary):
+        fields = {"status": "failed", "stage_message": "Failed",
+                  "error": "Generation was interrupted (the server restarted). Generate it again."}
+        _set_summary(summary["_id"], **fields)
+        summary.update(fields)
+    return summary
 
 
 class _Throttle:
@@ -74,6 +124,14 @@ def create_summary(doc: dict, user: dict, *, mode: str, length: str, language: s
 
 
 def run_summary(summary_id: ObjectId, on_progress=None) -> bool:
+    _own(summary_id)
+    try:
+        return _run_summary(summary_id, on_progress)
+    finally:
+        _release(summary_id)
+
+
+def _run_summary(summary_id: ObjectId, on_progress=None) -> bool:
     db = get_db()
     summary = db.summaries.find_one({"_id": summary_id})
     if not summary:
@@ -114,6 +172,7 @@ def run_summary(summary_id: ObjectId, on_progress=None) -> bool:
 
 
 def enqueue_summary(summary_id: ObjectId):
+    _own(summary_id)
     _executor.submit(run_summary, summary_id)
 
 
@@ -158,7 +217,12 @@ def process_document(doc_id: ObjectId):
                  ocr_used=result.ocr_used, ocr_engine=result.ocr_engine)
 
         info = insights_mod.analyze(text, soon_days=Config.EXPIRING_SOON_DAYS)
-        info["fields"] = fields_mod.extract_fields(text)
+        table = tabular.parse(text)
+        if table:  # a spreadsheet: its rows are data, not "Label: value" fields or prose
+            info["doc_type"] = tabular.doc_type(tabular.analyze(table))
+            info["fields"] = []
+        else:
+            info["fields"] = fields_mod.extract_fields(text)
         info["expiry"] = _labelled_expiry(info) or info.get("expiry")
         is_plan = plan_mod.detect_plan(text) is not None
         _set_doc(doc_id, progress=64, stage_message="Document analysed", insights=info,
@@ -211,7 +275,8 @@ def process_document(doc_id: ObjectId):
 
 
 def enqueue_document(doc_id: ObjectId):
-    _executor.submit(process_document, doc_id)
+    _own(doc_id)
+    _executor.submit(_owned, process_document, doc_id)
 
 
 # ------------------------------------------------------------------ chat

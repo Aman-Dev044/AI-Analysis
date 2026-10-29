@@ -9,7 +9,7 @@ import re
 from datetime import date
 from typing import Optional
 
-from services import brief, extractive
+from services import brief, extractive, tabular
 from services.insights import AMOUNT_RE, DATE_RE, PERCENT_RE, parse_date
 
 SCALE = {"brief": 0.6, "standard": 1.0, "comprehensive": 1.8}
@@ -363,6 +363,9 @@ STYLES = {"short": _short, "detailed": _detailed, "bullets": _bullets_mode, "exe
 
 def summarize(text: str, insights: dict, *, mode: str = "smart", length: str = "standard", instructions: str = "",
               title: str = "") -> str:
+    table = tabular.parse(text)
+    if table:
+        return tabular.summarize(table, mode=mode, length=length, title=title, instructions=instructions)
     if mode not in STYLES:
         facts = brief.collect(text, insights, length=length)
         return brief.compose(facts, brief.fallback_overview(facts), title)
@@ -395,6 +398,9 @@ INTENT_WORDS = {"what", "kya", "hai", "kab", "kitna", "kitni", "batao", "the", "
 
 
 def answer(text: str, question: str, insights: dict) -> str:
+    table = tabular.parse(text)
+    if table:
+        return tabular.answer(table, question)
     facts = brief.collect(text, insights)
     q = question.lower()
     lines = []

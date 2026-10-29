@@ -8,7 +8,7 @@ Collections used (kept minimal because the shared Atlas cluster has a collection
   files          – original file bytes, split into <=4 MB chunks
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from bson import Binary, ObjectId
@@ -52,18 +52,22 @@ def init_db() -> None:
     db.chat_messages.create_index([("document_id", ASCENDING), ("_id", ASCENDING)])
     db.files.create_index([("file_id", ASCENDING), ("n", ASCENDING)], unique=True)
 
-    # Work interrupted by a restart can never finish; surface it so the user can retry.
+    # Work interrupted by a restart can never finish; surface it so the user can retry. Only work that has
+    # not moved for a while: another live copy of the app may still be running a recent job. Anything newer
+    # is caught later by jobs.reap_document / reap_summary once it goes stale.
+    cutoff = utcnow() - timedelta(minutes=2)
+    stale = {"$nor": [{f: {"$gte": cutoff}} for f in ("updated_at", "created_at", "uploaded_at")]}
     db.documents.update_many(
-        {"status": {"$nin": ["ready", "failed"]}},
-        {"$set": {"status": "failed", "stage": "failed",
-                  "error": "Processing was interrupted by a server restart. Use Reprocess."}},
+        {"status": {"$nin": ["ready", "failed"]}, **stale},
+        {"$set": {"status": "failed", "stage": "failed", "stage_message": "Failed",
+                  "error": "Processing was interrupted (the server restarted). Use Reprocess to run it again."}},
     )
     db.summaries.update_many(
-        {"status": {"$in": ["queued", "running"]}},
-        {"$set": {"status": "failed", "error": "Generation was interrupted by a server restart."}},
+        {"status": {"$in": ["queued", "running"]}, **stale},
+        {"$set": {"status": "failed", "error": "Generation was interrupted (the server restarted). Generate it again."}},
     )
     db.chat_messages.update_many(
-        {"status": {"$in": ["queued", "running"]}},
+        {"status": {"$in": ["queued", "running"]}, **stale},
         {"$set": {"status": "failed", "error": "Interrupted by a server restart."}},
     )
     seed_admin()

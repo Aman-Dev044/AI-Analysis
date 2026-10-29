@@ -113,7 +113,11 @@
     var r = await fetch(url, opts);
     var data = await r.json().catch(function () { return {}; });
     if (r.status === 401) { location.href = "/login"; throw new Error("Please sign in again."); }
-    if (!r.ok) throw new Error(data.error || ("Request failed (" + r.status + ")"));
+    if (!r.ok) {
+      var err = new Error(data.error || ("Request failed (" + r.status + ")"));
+      err.status = r.status;
+      throw err;
+    }
     return data;
   }
   var GET = function (u) { return api("GET", u); };
@@ -218,11 +222,30 @@
     meta: null,
     health: null,
     uploads: [],          // upload queue items survive navigation
-    timers: [],           // view-scoped intervals, cleared on route change
+    timers: [],           // stop functions of view-scoped pollers, run on route change
+    view: null,           // the page element of the current route
     docCache: {}
   };
-  function every(ms, fn) { var t = setInterval(fn, ms); S.timers.push(t); return t; }
-  function clearTimers() { S.timers.forEach(clearInterval); S.timers = []; }
+  // Run fn every `ms` while the page that started it is still open. Ticks never overlap (a slow request
+  // is not stacked by the next one), the poller stops when the user navigates away, when fn returns
+  // false, or when the thing it polls no longer exists (HTTP 404). Returns a stop function.
+  function every(ms, fn) {
+    var page = S.view, stopped = false, timer = null;
+    var stop = function () { stopped = true; clearTimeout(timer); };
+    var alive = function () { return !stopped && (!page || page.isConnected); };
+    var tick = async function () {
+      if (!alive()) return;
+      var again = true;
+      try { again = (await fn()) !== false; } catch (e) { again = e.status !== 404; }
+      if (again && alive()) timer = setTimeout(tick, ms);
+    };
+    timer = setTimeout(tick, ms);
+    S.timers.push(stop);
+    return stop;
+  }
+  function clearTimers() { S.timers.forEach(function (stop) { stop(); }); S.timers = []; }
+  // True while `view` is still the page on screen (the user has not moved to another tab meanwhile).
+  function onPage(view) { return !!view && view.isConnected; }
 
   function setUserCard() {
     $("#userName").textContent = S.user.name;
@@ -258,11 +281,21 @@
       a.classList.toggle("active", a.dataset.route === name || (name === "doc" && a.dataset.route === "documents"));
     });
     $("#sidebar").classList.remove("open");
-    var view = $("#view");
+    var view = document.createElement("div");
+    view.className = "page";
+    $("#view").replaceChildren(view);
+    S.view = view;
     view.innerHTML = '<div class="skeleton" style="height:34px;width:260px;margin-bottom:22px"></div><div class="grid g-4"><div class="skeleton" style="height:86px"></div><div class="skeleton" style="height:86px"></div><div class="skeleton" style="height:86px"></div><div class="skeleton" style="height:86px"></div></div>';
     window.scrollTo(0, 0);
     Promise.resolve(routes[name](view, parts.slice(1))).catch(function (e) {
-      view.innerHTML = '<div class="card card-pad empty">' + icon("alert") + "<p>" + esc(e.message) + "</p></div>";
+      if (!onPage(view)) return;  // the user already moved on; this error belongs to a page that is gone
+      var missing = e.status === 404;
+      view.innerHTML = '<div class="card card-pad empty">' + icon("alert") + "<p>" +
+        esc(missing ? "This document no longer exists. It may have been deleted." : e.message) + "</p>" +
+        (missing ? '<a class="btn primary" href="#/documents">All documents</a>' : '<button class="btn" data-retry>' + icon("refresh", "sm") + "Try again</button>") +
+        "</div>";
+      var retry = $("[data-retry]", view);
+      if (retry) retry.addEventListener("click", route);
     });
   }
 
@@ -298,6 +331,7 @@
   // ================================================================== DASHBOARD
   async function viewDashboard(view) {
     var d = await GET("/api/dashboard");
+    if (!onPage(view)) return;
     $("#navDocs").textContent = d.stats.documents;
     var hour = new Date().getHours();
     var greet = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -339,15 +373,13 @@
         return '<li><div class="grow"><span class="title" style="font-weight:600;font-size:13px">' + esc(a.description) + '</span><span class="sub">' + ago(a.created_at) + "</span></div></li>";
       }).join("") + "</ul>" : '<div class="empty">No activity yet.</div>') +
       "</section></div></div>";
-    if (d.stats.processing) every(4000, function () { if (location.hash.indexOf("dashboard") >= 0 || !location.hash) refreshRecent(); });
+    if (d.stats.processing) every(4000, refreshRecent);
   }
   async function refreshRecent() {
-    try {
-      var d = await GET("/api/dashboard");
-      var list = $("#view .list");
-      if (list && d.recent.length) list.innerHTML = d.recent.map(docRow).join("");
-      if (!d.stats.processing) clearTimers();
-    } catch (e) { /* ignore transient errors */ }
+    var d = await GET("/api/dashboard");
+    var list = $("#view .list");
+    if (list && d.recent.length) list.innerHTML = d.recent.map(docRow).join("");
+    return d.stats.processing > 0;  // stop this poller only (never the next page's timers)
   }
   function statCard(ic, c, value, label) {
     return '<div class="card stat"><div class="stat-ic ' + c + '">' + icon(ic) + "</div><div><b>" + esc(value) + "</b><span>" + esc(label) + "</span></div></div>";
@@ -516,7 +548,13 @@
           toast(s.stage === "ready" ? "“" + s.title + "” is ready" : "Processing failed: " + s.title, s.stage === "ready" ? "ok" : "bad");
           return;
         }
-      } catch (e) { item.message = "Reconnecting… " + e.message; }
+      } catch (e) {
+        if (e.status === 404) {
+          item.stage = "failed"; item.error = "This document was deleted."; renderQueue(); updateNavUploads();
+          return;
+        }
+        item.message = "Reconnecting… " + e.message;
+      }
       setTimeout(tick, 900);
     };
     tick();
@@ -619,13 +657,16 @@
     $("#fstatus").addEventListener("change", function (e) { docFilter.status = e.target.value; loadDocs(); });
     $("#docList").addEventListener("click", onDocCardClick);
     await loadDocs(true);
-    every(3000, function () { if ($$("#docList .bar.live").length) loadDocs(); });
+    if (!onPage(view)) return;
+    every(3000, function () { if ($$("#docList .bar.live").length) return loadDocs(); });
   }
   async function loadDocs(first) {
     var qs = new URLSearchParams(docFilter).toString();
     var docs = await GET("/api/documents?" + qs);
+    if (!$("#docList")) return;  // the user left the documents page meanwhile
     if (first) {
-      var all = await GET("/api/documents");
+      var all = docFilter.q || docFilter.type || docFilter.status ? await GET("/api/documents") : docs;
+      if (!$("#docList")) return;
       $("#navDocs").textContent = all.length;
       var types = Array.from(new Set(all.map(function (d) { return d.doc_type; }).filter(Boolean))).sort();
       $("#ftype").innerHTML = '<option value="">All types</option>' + types.map(function (t) { return "<option>" + esc(t) + "</option>"; }).join("");
@@ -642,15 +683,25 @@
       return '<article class="card doc-card" data-id="' + d.id + '"><div class="top">' + fileIcon(d.ext) + '<div style="min-width:0;flex:1"><h4 title="' + esc(d.title) + '">' + esc(d.title) + '</h4><div class="meta">' +
         esc(d.doc_type || "—") + " · " + fmtSize(d.size) + "</div></div></div>" +
         (processing ? '<div><div class="bar thin live"><i style="width:' + d.progress + '%"></i></div><div class="meta" style="margin-top:6px">' + esc(d.stage_message || "") + "</div></div>" :
+          d.status === "failed" ? '<div class="meta err" title="' + esc(d.error || "") + '">' + esc(d.error || "Processing failed.") + "</div>" :
           '<div class="meta">' + (d.pages ? d.pages + " pages · " : "") + (d.word_count ? d.word_count.toLocaleString("en-IN") + " words · " : "") + (d.reading_minutes ? d.reading_minutes + " min read" : "") + "</div>") +
         '<div class="row wrap" style="gap:6px">' + statusBadge(d) + expiryBadge(d.expiry) + (d.ocr_used ? '<span class="badge info">OCR</span>' : "") + (d.is_plan ? '<span class="badge primary">Plan</span>' : "") + "</div>" +
         '<div class="foot"><span class="meta">' + ago(d.uploaded_at) + '</span><div class="row" style="gap:4px">' +
+        (d.status === "failed" ? '<button class="btn sm ghost icon-only" title="Reprocess" data-reprocess="' + d.id + '">' + icon("refresh", "sm") + "</button>" : "") +
         '<a class="btn sm ghost icon-only" title="Download original" href="/api/documents/' + d.id + '/file?download=1" data-stop>' + icon("download", "sm") + "</a>" +
         '<button class="btn sm ghost icon-only danger" title="Delete" data-del="' + d.id + '" data-title="' + esc(d.title) + '">' + icon("trash", "sm") + "</button></div></div></article>";
     }).join("");
   }
   async function onDocCardClick(e) {
     if (e.target.closest("[data-stop]")) return;
+    var re = e.target.closest("[data-reprocess]");
+    if (re) {
+      e.stopPropagation();
+      re.disabled = true;
+      try { await POST("/api/documents/" + re.dataset.reprocess + "/reprocess"); toast("Reprocessing started", "ok"); await loadDocs(); }
+      catch (err) { toast(err.message, "bad"); re.disabled = false; }
+      return;
+    }
     var del = e.target.closest("[data-del]");
     if (del) {
       e.stopPropagation();
@@ -669,6 +720,7 @@
   async function viewDoc(view, args) {
     var id = args[0];
     var doc = await GET("/api/documents/" + id);
+    if (!onPage(view)) return;  // never let a late response replace the open document's state
     D = { doc: doc, current: null, mode: S.user.prefs.mode || "smart", length: S.user.prefs.length || "standard", language: S.user.prefs.language || "English", tab: "insights", size: "m", hl: true, chat: [] };
     if (doc.status !== "ready" && doc.status !== "failed") return renderProcessing(view, doc);
     renderDoc(view);
@@ -690,9 +742,12 @@
     every(900, async function () {
       try {
         var s = await GET("/api/documents/" + doc.id + "/status");
-        if (s.status === "ready" || s.status === "failed") { clearTimers(); route(); return; }
+        if (!onPage(view)) return false;
+        if (s.status === "ready" || s.status === "failed") { route(); return false; }
         paint(s);
-      } catch (e) { /* retry next tick */ }
+      } catch (e) {
+        if (e.status === 404 && onPage(view)) { toast("This document was deleted", "bad"); location.hash = "#/documents"; return false; }
+      }
     });
   }
 
@@ -863,7 +918,7 @@
 
   var summaryPoll = null;
   function selectSummary(id) {
-    if (summaryPoll) { clearInterval(summaryPoll); summaryPoll = null; }
+    if (summaryPoll) { summaryPoll(); summaryPoll = null; }
     var out = $("#output");
     if (!id) {
       D.current = null;
@@ -876,22 +931,22 @@
     $$("#history button").forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.sid === id); });
     paintSummary();
     if (D.current.status === "queued" || D.current.status === "running") {
-      summaryPoll = setInterval(async function () {
-        try {
-          var s = await GET("/api/summaries/" + id);
-          var i = D.doc.summaries.findIndex(function (x) { return x.id === id; });
-          if (i >= 0) D.doc.summaries[i] = s;
-          if (!D.current || D.current.id !== id) return;
-          D.current = s;
-          paintSummary();
-          if (s.status === "done" || s.status === "failed") {
-            clearInterval(summaryPoll); summaryPoll = null;
-            renderHistory();
-            toast(s.status === "done" ? s.mode_label + " ready" : "Summary failed", s.status === "done" ? "ok" : "bad");
-          }
-        } catch (e) { /* retry */ }
-      }, 700);
-      S.timers.push(summaryPoll);
+      var docId = D.doc.id;
+      summaryPoll = every(700, async function () {
+        var s = await GET("/api/summaries/" + id);
+        if (!D || D.doc.id !== docId) return false;
+        var i = D.doc.summaries.findIndex(function (x) { return x.id === id; });
+        if (i >= 0) D.doc.summaries[i] = s;
+        if (!D.current || D.current.id !== id) return false;
+        D.current = s;
+        paintSummary();
+        if (s.status === "done" || s.status === "failed") {
+          summaryPoll = null;
+          renderHistory();
+          toast(s.status === "done" ? s.mode_label + " ready" : "Summary failed", s.status === "done" ? "ok" : "bad");
+          return false;
+        }
+      });
     }
   }
 
@@ -919,12 +974,18 @@
   // ------------------------------------------------------------------ side tabs
   function switchTab(tab) {
     D.tab = tab;
+    var seq = D.tabSeq = (D.tabSeq || 0) + 1;
     $$("#tabs [data-tab]").forEach(function (b) { b.setAttribute("aria-selected", b.dataset.tab === tab); });
     var body = $("#tabBody");
+    var current = function () { return body.isConnected && D.tabSeq === seq; };  // still the tab on screen?
+    var load = null;
     if (tab === "insights") body.innerHTML = '<div class="tab-body">' + insightsHTML(D.doc) + "</div>";
     else if (tab === "plan") body.innerHTML = '<div class="tab-body" style="padding:0">' + planCard(Object.assign({ title: "Plan overview" }, D.doc.plan), false).replace('<section class="card">', "<div>").replace(/<\/section>$/, "</div>") + "</div>";
-    else if (tab === "text") renderTextTab(body);
-    else if (tab === "chat") renderChatTab(body);
+    else if (tab === "text") load = renderTextTab(body, current);
+    else if (tab === "chat") load = renderChatTab(body, current);
+    if (load) load.catch(function (e) {
+      if (current()) body.innerHTML = '<div class="tab-body empty">' + icon("alert") + "<p>" + esc(e.message) + "</p></div>";
+    });
   }
 
   function insightsHTML(doc) {
@@ -975,15 +1036,18 @@
     return h;
   }
 
-  async function renderTextTab(body) {
+  async function renderTextTab(body, current) {
     body.innerHTML = '<div class="tab-body"><div class="row" style="margin-bottom:12px"><div class="input-icon" style="flex:1">' + icon("search", "sm") +
       '<input class="input" id="textSearch" placeholder="Find in text…"></div><span class="muted" id="hitCount" style="font-size:12px;min-width:60px"></span></div>' +
       '<div class="row" style="margin-bottom:12px;gap:6px"><button class="btn sm" id="copyText">' + icon("copy", "sm") + 'Copy text</button><a class="btn sm" href="/api/documents/' + D.doc.id + '/file?download=1">' + icon("download", "sm") + "Original</a></div>" +
       '<div class="source-text" id="srcText"><div class="skeleton" style="height:200px"></div></div></div>';
     if (D.text == null || D.textFor !== D.doc.id) {
-      D.text = (await GET("/api/documents/" + D.doc.id + "/text")).text;
-      D.textFor = D.doc.id;
+      var docId = D.doc.id, text = (await GET("/api/documents/" + docId + "/text")).text;
+      if (!D || D.doc.id !== docId) return;
+      D.text = text;
+      D.textFor = docId;
     }
+    if (!current()) return;  // the user switched to another tab while the text was loading
     var paint = function (q) {
       var src = $("#srcText"); if (!src) return;
       if (!q) { src.textContent = D.text; $("#hitCount").textContent = ""; return; }
@@ -1000,13 +1064,15 @@
 
   // ------------------------------------------------------------------ chat
   var SUGGESTIONS = ["What is this document about?", "List all deadlines and due dates", "What are the key numbers?", "What do I need to do next?", "Iska short summary Hinglish mein do"];
-  async function renderChatTab(body) {
+  async function renderChatTab(body, current) {
     body.innerHTML = '<div class="chat"><div class="chat-log" id="chatLog"><div class="skeleton" style="height:60px"></div></div>' +
       '<div class="suggest" id="suggest">' + SUGGESTIONS.map(function (q) { return "<button>" + esc(q) + "</button>"; }).join("") + "</div>" +
       '<form class="chat-form" id="chatForm"><textarea class="textarea" id="chatInput" rows="1" placeholder="Ask anything about this document…"></textarea>' +
       '<button class="btn primary icon-only" style="height:42px;width:42px" aria-label="Send">' + icon("send", "sm") + "</button></form>" +
       '<div class="row between" style="padding:0 14px 10px"><span class="muted" style="font-size:11.5px">Answers come only from this document.</span><button class="btn sm ghost" id="clearChat">Clear chat</button></div></div>';
-    D.chat = await GET("/api/documents/" + D.doc.id + "/chat");
+    var chat = await GET("/api/documents/" + D.doc.id + "/chat");
+    if (!current()) return;  // switched away meanwhile: don't paint or start pollers for a hidden tab
+    D.chat = chat;
     paintChat();
     D.chat.filter(function (m) { return m.status === "queued" || m.status === "running"; }).forEach(function (m) { pollChat(m.id); });
     $("#suggest").addEventListener("click", function (e) { var b = e.target.closest("button"); if (b) sendChat(b.textContent); });
@@ -1046,23 +1112,21 @@
     } catch (e) { toast(e.message, "bad"); }
   }
   function pollChat(id) {
-    var t = setInterval(async function () {
-      try {
-        var m = await GET("/api/chat/" + id);
-        var i = D.chat.findIndex(function (x) { return x.id === id; });
-        if (i < 0) { clearInterval(t); return; }
-        D.chat[i] = m;
-        if (D.tab === "chat") paintChat();
-        if (m.status === "done" || m.status === "failed") clearInterval(t);
-      } catch (e) { /* retry */ }
-    }, 600);
-    S.timers.push(t);
+    every(600, async function () {
+      var m = await GET("/api/chat/" + id);
+      var i = D ? D.chat.findIndex(function (x) { return x.id === id; }) : -1;
+      if (i < 0) return false;
+      D.chat[i] = m;
+      if (D.tab === "chat") paintChat();
+      return m.status !== "done" && m.status !== "failed";
+    });
   }
 
   // ================================================================== SETTINGS
   async function viewSettings(view) {
     await checkHealth();
     var calendar = await GET("/api/google-calendar/status");
+    if (!onPage(view)) return;
     var h = S.health, p = S.user.prefs, m = S.meta;
     var models = h.models && h.models.length ? h.models : [m.default_model];
     view.innerHTML = '<div class="page-head"><div><h1>Settings</h1><p>Profile, summary defaults and AI connection.</p></div></div>' +

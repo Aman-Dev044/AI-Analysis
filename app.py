@@ -98,6 +98,7 @@ def owned_doc(user, doc_id, projection=None):
 
 
 def doc_brief(doc: dict) -> dict:
+    jobs.reap_document(doc)
     info = doc.get("insights") or {}
     return {
         "id": str(doc["_id"]),
@@ -126,6 +127,7 @@ def doc_brief(doc: dict) -> dict:
 
 
 def summary_out(s: dict) -> dict:
+    jobs.reap_summary(s)
     return {
         "id": str(s["_id"]), "document_id": str(s["document_id"]), "mode": s.get("mode"),
         "mode_label": summarizer.MODES.get(s.get("mode"), {}).get("label", s.get("mode")),
@@ -564,7 +566,19 @@ def create_app():
     return app
 
 
+def _port_in_use(port: int) -> bool:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
 if __name__ == "__main__":
+    # Check before touching the database: a second copy must not mark the running copy's jobs as interrupted.
+    if _port_in_use(5000):
+        log.error("Port 5000 is already in use - DocuMind (or another app) is already running. "
+                  "Open http://127.0.0.1:5000 or stop the other process first.")
+        raise SystemExit(1)
     create_app()
     try:
         from waitress import serve

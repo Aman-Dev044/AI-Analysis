@@ -4,7 +4,7 @@ import re
 from typing import Callable, Optional
 
 from config import Config
-from services import brief, extractive, ollama_client, rulebased
+from services import brief, extractive, ollama_client, rulebased, tabular
 from services.insights import facts_for_prompt
 
 ProgressFn = Callable[[int, str, Optional[str]], None]  # (percent, message, partial_markdown)
@@ -178,6 +178,11 @@ def summarize(
     if not source:
         raise ValueError("The document has no readable text to summarise.")
 
+    table = tabular.parse(source)
+    if table and (mode == "smart" or Config.AI_BACKEND == "rules"):
+        progress(50, "Summarising the table", None)
+        return clean_markdown(tabular.summarize(table, mode=mode, length=length, title=title, instructions=instructions))
+
     if Config.AI_BACKEND == "rules" and mode != "smart":
         progress(50, "Building summary from the document", None)
         return clean_markdown(rulebased.summarize(source, insights or {}, mode=mode, length=length,
@@ -218,6 +223,9 @@ def summarize(
         base = 8 if condensed else 5
 
     facts = facts_for_prompt(insights or {})
+    if table:  # give the model an exact digest of the table so counts and ranges are right
+        digest = tabular.summarize(table, mode="detailed", title=title)
+        facts = (facts + "\n\nTABLE DIGEST (computed from every row):\n" + digest).strip()
     doc_title = extractive.doc_title(source) or title
     outline = [h for h in (insights or {}).get("headings", []) if h.lower() != doc_title.lower()][:15]
     user_prompt = "\n\n".join(filter(None, [
@@ -287,7 +295,6 @@ def clean_markdown(text: str) -> str:
     text = re.sub(r"(?m)^(#{1,6})([^#\s])", r"\1 \2", text)  # "###Key" -> "### Key"
     text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]*$", "", text)       # empty headings
     text = re.sub(r"(?m)^([ \t]*)[•●▪◦·]\s*", r"\1- ", text)   # "• point" -> "- point"
-    text = re.sub(r"\*\*\s+([^*\n]+?)\s+\*\*", r"**\1**", text)  # "** bold **" does not render
     text = _space_blocks(text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
