@@ -44,10 +44,19 @@ class Config:
     OLLAMA_TIMEOUT = _int("OLLAMA_TIMEOUT_SECONDS", 600)
     OLLAMA_NUM_CTX = _int("OLLAMA_NUM_CTX", 8192)
     OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "")
+    OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 
     # Summarisation
     CHUNK_CHARS = _int("CHUNK_CHARS", 12000)  # text per model call before map-reduce
     MAX_CHUNKS = _int("MAX_CHUNKS", 40)
+    # Long documents: "extractive" picks key sentences instantly (fast on CPU); "mapreduce" reads every part
+    # with the model (thorough, slow on CPU).
+    LONG_DOC_STRATEGY = os.getenv("LONG_DOC_STRATEGY", "extractive").strip().lower()
+    # Smart brief: let the model write the short overview (False = instant, fully rule-based brief).
+    SMART_AI_OVERVIEW = _bool("SMART_AI_OVERVIEW", True)
+    DEFAULT_MODE = os.getenv("DEFAULT_MODE", "smart")
+    # ollama = use the model (falls back to rules if it is unreachable); rules = never call a model
+    AI_BACKEND = os.getenv("AI_BACKEND", "ollama").strip().lower()
 
     # OCR: auto | rapid | paddle | tesseract | ollama | off
     OCR_ENGINE = os.getenv("OCR_ENGINE", "auto").strip().lower()

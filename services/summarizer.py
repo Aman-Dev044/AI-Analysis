@@ -4,12 +4,18 @@ import re
 from typing import Callable, Optional
 
 from config import Config
-from services import ollama_client
+from services import brief, extractive, ollama_client, rulebased
 from services.insights import facts_for_prompt
 
 ProgressFn = Callable[[int, str, Optional[str]], None]  # (percent, message, partial_markdown)
 
 MODES = {
+    "smart": {
+        "label": "Smart brief",
+        "icon": "target",
+        "desc": "Key facts, dates & status — fast",
+        "prompt": "",  # built by services.brief: rule-extracted facts + a short verified AI overview
+    },
     "short": {
         "label": "Short summary",
         "icon": "zap",
@@ -135,6 +141,10 @@ def split_chunks(text: str, size: int) -> list[str]:
     return chunks
 
 
+# Output cap per length: small CPU models otherwise ramble or loop, which is the slowest part.
+NUM_PREDICT = {"brief": 450, "standard": 1000, "comprehensive": 2200}
+
+
 def _expected_chars(length: str) -> int:
     return {"brief": 900, "standard": 2200, "comprehensive": 5500}.get(length, 2200)
 
@@ -168,8 +178,25 @@ def summarize(
     if not source:
         raise ValueError("The document has no readable text to summarise.")
 
-    # --- map phase for long documents
+    if Config.AI_BACKEND == "rules" and mode != "smart":
+        progress(50, "Building summary from the document", None)
+        return clean_markdown(rulebased.summarize(source, insights or {}, mode=mode, length=length,
+                                                  instructions=instructions, title=title))
+
+    if mode == "smart":
+        return clean_markdown(brief.smart_summary(
+            source, insights or {}, length=length, language=language, language_rule=language_rule(language),
+            instructions=instructions, title=title, model=model, progress=progress,
+        ))
+
+    # --- long documents: fast extractive condensing, or a model map phase
     chunks = split_chunks(source, Config.CHUNK_CHARS)
+    if len(chunks) > 1 and Config.LONG_DOC_STRATEGY != "mapreduce":
+        progress(5, "Selecting the key sentences", None)
+        chunks = [extractive.condense(source, Config.CHUNK_CHARS)]
+        condensed = True
+    else:
+        condensed = False
     if len(chunks) > Config.MAX_CHUNKS:
         chunks = chunks[:Config.MAX_CHUNKS]
     if len(chunks) > 1:
@@ -186,18 +213,22 @@ def summarize(
         material_label = "NOTES EXTRACTED FROM THE FULL DOCUMENT"
         base = 60
     else:
-        material = source
-        material_label = "DOCUMENT TEXT"
-        base = 5
+        material = chunks[0] if condensed else source
+        material_label = "KEY SENTENCES SELECTED FROM THE FULL DOCUMENT" if condensed else "DOCUMENT TEXT"
+        base = 8 if condensed else 5
 
     facts = facts_for_prompt(insights or {})
+    doc_title = extractive.doc_title(source) or title
+    outline = [h for h in (insights or {}).get("headings", []) if h.lower() != doc_title.lower()][:15]
     user_prompt = "\n\n".join(filter(None, [
         f"TASK: {mode_cfg['prompt']}",
         f"Custom instructions from the user: {instructions.strip()}" if instructions.strip() else "",
         LENGTHS.get(length, LENGTHS["standard"]),
         language_rule(language),
         FORMAT_RULES,
-        f"Document title: {title}" if title else "",
+        f"Document title: {doc_title}" if doc_title else "",
+        ("DOCUMENT SECTIONS (follow this order for your ### sections):\n" + "\n".join(f"- {h}" for h in outline))
+        if mode == "detailed" and len(outline) >= 2 else "",
         f"VERIFIED FACTS (detected in the document; use them and keep them bold):\n{facts}" if facts else "",
         f"<{material_label}>\n{material}\n</{material_label}>",
     ]))
@@ -209,10 +240,15 @@ def summarize(
         pct = base + min(38, int(len(partial) / expected * (98 - base)))
         progress(min(pct, 98), "Writing summary", partial)
 
-    result = ollama_client.chat(
-        [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
-        model=model, temperature=0.25, on_token=on_token,
-    )
+    try:
+        result = ollama_client.chat(
+            [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
+            model=model, temperature=0.25, num_predict=NUM_PREDICT.get(length, 1000), on_token=on_token,
+        )
+    except ollama_client.OllamaError:
+        # No model available: still give the user a summary built from the document itself.
+        return clean_markdown(rulebased.summarize(source, insights or {}, mode=mode, length=length,
+                                                  instructions=instructions, title=title))
     return clean_markdown(result)
 
 
@@ -222,13 +258,37 @@ _TLDR_LABEL = re.compile(
 )
 
 
+_BLOCK_START = re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\||>)")
+
+
+def _space_blocks(text: str) -> str:
+    """Blank line before a heading, list or table that follows a paragraph, so Markdown renders it as one."""
+    out = []
+    for line in text.split("\n"):
+        prev = out[-1] if out else ""
+        starts = _BLOCK_START.match(line.lstrip())
+        same_kind = prev.strip() and (
+            (line.lstrip().startswith("|") and prev.lstrip().startswith("|"))
+            or (re.match(r"^(?:[-*+]|\d+[.)])\s", line.lstrip()) and re.match(r"^\s*(?:[-*+]|\d+[.)])\s|^\s{2,}\S", prev))
+            or (line.lstrip().startswith(">") and prev.lstrip().startswith(">")))
+        if starts and prev.strip() and not same_kind:
+            out.append("")
+        if line.strip() and not starts and (prev.lstrip().startswith(("#", "|"))):
+            out.append("")  # and after a heading or a table
+        out.append(line)
+    return "\n".join(out)
+
+
 def clean_markdown(text: str) -> str:
-    """Tidy model Markdown: no code fences, no "TL;DR" labels, well-formed headings."""
+    """Tidy model Markdown: no code fences, no "TL;DR" labels, well-formed headings, lists and tables."""
     text = re.sub(r"^```(?:markdown|md)?\s*\n", "", text.strip())
     text = re.sub(r"\n```\s*$", "", text)
     text = _TLDR_LABEL.sub("", text)
     text = re.sub(r"(?m)^(#{1,6})([^#\s])", r"\1 \2", text)  # "###Key" -> "### Key"
     text = re.sub(r"(?m)^[ \t]*#{1,6}[ \t]*$", "", text)       # empty headings
+    text = re.sub(r"(?m)^([ \t]*)[•●▪◦·]\s*", r"\1- ", text)   # "• point" -> "- point"
+    text = re.sub(r"\*\*\s+([^*\n]+?)\s+\*\*", r"**\1**", text)  # "** bold **" does not render
+    text = _space_blocks(text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -246,7 +306,10 @@ def answer_question(
     language: str = "English",
     model: Optional[str] = None,
     on_token: Optional[Callable[[str], None]] = None,
+    insights: Optional[dict] = None,
 ) -> str:
+    if Config.AI_BACKEND == "rules":
+        return rulebased.answer(text, question, insights or {})
     if len(text) <= Config.CHUNK_CHARS:
         context = text
     else:
@@ -266,4 +329,7 @@ def answer_question(
     for item in history[-6:]:
         messages.append({"role": item["role"], "content": item["content"]})
     messages.append({"role": "user", "content": question})
-    return clean_markdown(ollama_client.chat(messages, model=model, temperature=0.2, on_token=on_token))
+    try:
+        return clean_markdown(ollama_client.chat(messages, model=model, temperature=0.2, on_token=on_token))
+    except ollama_client.OllamaError:
+        return rulebased.answer(text, question, insights or {})

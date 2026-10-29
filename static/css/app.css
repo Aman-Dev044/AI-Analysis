@@ -354,6 +354,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .kv div { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
 .kv small { display: block; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
 .kv b { font-size: 16px; }
+.facts { display: grid; grid-template-columns: minmax(110px, auto) 1fr; margin: 0 0 16px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; font-size: 13px; }
+.facts dt, .facts dd { margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.facts dt { background: var(--surface-2); color: var(--muted); font-weight: 600; }
+.facts dd { font-weight: 600; overflow-wrap: anywhere; }
+.facts dt:nth-last-of-type(1), .facts dd:last-child { border-bottom: 0; }
 .section-title { font-size: 11.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 8px; display: flex; align-items: center; gap: 6px; }
 .timeline { position: relative; padding-left: 20px; }
 .timeline::before { content: ""; position: absolute; left: 6px; top: 6px; bottom: 6px; width: 2px; background: var(--border); }

@@ -83,7 +83,7 @@ def seed_admin() -> bool:
         "email": email,
         "password_hash": password_hash,
         "role": "admin",
-        "prefs": {"mode": "short", "language": "English", "length": "standard", "model": None},
+        "prefs": {"mode": Config.DEFAULT_MODE, "language": "English", "length": "standard", "model": None},
         "activity": [],
         "created_at": utcnow(),
     })

@@ -24,9 +24,9 @@ DATE_RE = re.compile(
 )
 LABELS = [
     ("expiry", re.compile(r"\b(expir\w*|valid\s+(?:until|till|upto|up\s+to|through|thru)|validity|renew\w*|date\s+of\s+expiry)\b", re.I)),
-    ("deadline", re.compile(r"\b(deadline|due(?:\s+date)?|last\s+date|submit\w*\s+by|on\s+or\s+before|before)\b", re.I)),
+    ("deadline", re.compile(r"\b(deadline|due(?:\s+date)?|last\s+date|submit\w*\s+by|on\s+or\s+before|before)\b|\bby\s*$", re.I)),
     ("review", re.compile(r"\b(review|meeting|appointment|hearing|interview|exam\w*)\b", re.I)),
-    ("issue", re.compile(r"\b(issue[d]?|date\s+of\s+issue|dated|effective|start\w*|commenc\w*)\b", re.I)),
+    ("issue", re.compile(r"\b(issued|issue\s+date|date\s+of\s+issue|dated|effective|start\w*|commenc\w*)\b", re.I)),
     ("birth", re.compile(r"\b(date\s+of\s+birth|dob|born)\b", re.I)),
 ]
 AMOUNT_RE = re.compile(
@@ -45,6 +45,7 @@ DOC_TYPES = [
     ("Receipt", r"\breceipt\b|\bpayment received\b|\btransaction id\b"),
     ("Bank statement", r"\baccount statement\b|\bopening balance\b|\bclosing balance\b"),
     ("Resume / CV", r"\bcurriculum vitae\b|\bresume\b|\bwork experience\b.*\beducation\b"),
+    ("Meeting notes", r"\bminutes of (?:the )?[\w ]{0,40}meeting\b|\bagenda\b|\battendees\b"),
     ("Contract / Agreement", r"\bagreement\b|\bcontract\b|\bhereinafter\b|\bparty of the first part\b"),
     ("Insurance policy", r"\bpolicy\s*(?:no|number)\b|\bsum insured\b|\bpremium\b|\binsured\b"),
     ("Driving licence", r"\bdriving licen[cs]e\b"),
@@ -55,7 +56,6 @@ DOC_TYPES = [
     ("Certificate", r"\bcertificate\b|\bthis is to certify\b"),
     ("Legal notice", r"\blegal notice\b|\bhon'?ble court\b|\bpetitioner\b|\brespondent\b"),
     ("Research paper", r"\babstract\b.*\b(introduction|methodology|references)\b"),
-    ("Meeting notes", r"\bminutes of (?:the )?meeting\b|\bagenda\b|\battendees\b"),
     ("Report", r"\breport\b|\bexecutive summary\b|\bfindings\b"),
     ("Letter", r"^\s*(?:dear|respected)\b|\byours (?:sincerely|faithfully)\b"),
 ]
@@ -216,6 +216,8 @@ def facts_for_prompt(info: dict, max_dates: int = 25) -> str:
     lines = []
     if info.get("doc_type"):
         lines.append(f"Detected document type: {info['doc_type']}")
+    for f in info.get("fields", []):
+        lines.append(f"{f['label']}: {f['value']}")
     for d in info.get("dates", [])[:max_dates]:
         lines.append(f"Date: {d['text']} ({d['label']}) — {d['context'][:140]}")
     if info.get("amounts"):

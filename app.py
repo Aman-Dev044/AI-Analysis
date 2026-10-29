@@ -82,7 +82,7 @@ def public_user(user: dict) -> dict:
     return {
         "id": str(user["_id"]), "name": user.get("name", ""), "email": user.get("email", ""),
         "role": user.get("role", "user"), "created_at": iso(user.get("created_at")),
-        "prefs": {"mode": prefs.get("mode", "short"), "language": prefs.get("language", "English"),
+        "prefs": {"mode": prefs.get("mode", Config.DEFAULT_MODE), "language": prefs.get("language", "English"),
                   "length": prefs.get("length", "standard"), "model": prefs.get("model")},
     }
 
@@ -174,7 +174,7 @@ def signup():
     try:
         user_id = get_db().users.insert_one({
             "name": name, "email": email, "password_hash": generate_password_hash(password),
-            "role": "user", "prefs": {"mode": "short", "language": "English", "length": "standard"},
+            "role": "user", "prefs": {"mode": Config.DEFAULT_MODE, "language": "English", "length": "standard"},
             "created_at": utcnow(),
         }).inserted_id
     except DuplicateKeyError:
@@ -256,6 +256,8 @@ def meta(user):
 @app.get("/api/ollama/health")
 @login_required
 def ollama_health(user):
+    if Config.AI_BACKEND == "rules":
+        return jsonify({"ok": True, "backend": "rules", "models": [], "default_model": "Offline engine"})
     return jsonify(ollama_client.health())
 
 
@@ -473,7 +475,7 @@ def new_summary(user, doc_id):
     if data.get("mode") == "custom" and not (data.get("instructions") or "").strip():
         return api_error("Write your custom instructions first.")
     summary_id = jobs.create_summary(
-        doc, user, mode=data.get("mode", "short"), length=data.get("length", "standard"),
+        doc, user, mode=data.get("mode", Config.DEFAULT_MODE), length=data.get("length", "standard"),
         language=data.get("language", "English"), instructions=data.get("instructions") or "",
         model=(data.get("model") or "").strip() or None,
     )

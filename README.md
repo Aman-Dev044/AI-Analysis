@@ -8,7 +8,12 @@ upload shows live, stage-by-stage progress while the summary is written.
 ## Features
 
 - **Live processing pipeline** — Upload % → Extract (page by page) → Analyze → Summarize (streams word by word) → Ready.
-- **9 summary styles** — Short, Detailed, Key points, Executive brief, Dates & deadlines timeline,
+- **Smart brief (default, built for CPU servers)** — key details (name, ID/licence/policy/invoice no., address,
+  amounts…) and important dates (issue, creation, renewal, expiry, due, birth) are read straight from the text by
+  rules, so they are exact and instant; a status line shows valid / expiring soon / expired with days left, plus
+  key sentences and an "Action needed" list. The model writes only a 2–6 sentence overview, and any sentence that
+  mentions a date, number or name not found in the document is dropped. Works even when Ollama is down.
+- **More summary styles** — Short, Detailed, Key points, Executive brief, Dates & deadlines timeline,
   Action items checklist, Explain simply, Study notes / quiz, and Custom prompt.
 - **Length** (brief / standard / comprehensive), **14 languages** incl. Hindi & Hinglish, per-summary **model picker**.
 - **Rich formatting** — Markdown with bold facts, `<u>` underlined warnings, tables, checklists, quotes;
@@ -62,6 +67,10 @@ database with `python seed.py --set-password` (users can also change it from **S
 | `OLLAMA_VISION_MODEL` | empty | e.g. `qwen2.5vl:3b` for OCR via Ollama |
 | `OCR_ENGINE`, `TESSERACT_CMD` | `auto` | `auto` (rapid → paddle → tesseract → ollama), or one of `rapid`, `paddle`, `tesseract`, `ollama`, `off` |
 | `CHUNK_CHARS`, `MAX_CHUNKS` | `12000`, `40` | long-document chunking |
+| `LONG_DOC_STRATEGY` | `extractive` | `extractive` (key sentences, fast) or `mapreduce` (model reads every part, slow on CPU) |
+| `AI_BACKEND` | `ollama` | `rules` runs every summary style and Ask AI without any model (instant, offline); with `ollama`, a failed model call falls back to rules |
+| `DEFAULT_MODE`, `SMART_AI_OVERVIEW` | `smart`, `true` | default summary style; `false` = Smart brief with no model call |
+| `OLLAMA_KEEP_ALIVE` | `30m` | keep the model in RAM between requests |
 | `MAX_UPLOAD_MB`, `WORKERS` | `25`, `2` | upload limit, parallel background jobs |
 | `SEED_ADMIN_*` | | seeded login |
 
@@ -79,6 +88,10 @@ seed.py                one-off DB init + admin login
 services/
   extractor.py         PDF / DOC / DOCX / TXT / CSV / SVG / image text extraction + OCR engines
   insights.py          deterministic dates, expiry, amounts, contacts, doc type
+  fields.py            labelled key fields (Name, Licence No, Valid Till, Total…) incl. OCR layouts
+  extractive.py        model-free key-sentence selection
+  brief.py             Smart brief: facts + verified short AI overview
+  rulebased.py         all summary styles + document Q&A without a model (AI_BACKEND=rules)
   plan.py              work-plan & schedule understanding for the dashboard
   summarizer.py        prompts, styles, map-reduce, document Q&A
   ollama_client.py     streaming client for local / VPS Ollama

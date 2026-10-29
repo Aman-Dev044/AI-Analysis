@@ -97,6 +97,7 @@ def chat(
     model: Optional[str] = None,
     temperature: float = 0.3,
     num_predict: int = -1,
+    num_ctx: Optional[int] = None,
     on_token: Optional[Callable[[str], None]] = None,
 ) -> str:
     """Run a chat completion, streaming partial text to on_token(full_text_so_far)."""
@@ -105,9 +106,10 @@ def chat(
         "messages": messages,
         "stream": True,
         "think": False,
+        "keep_alive": Config.OLLAMA_KEEP_ALIVE,  # keep the model in RAM: reloading it costs seconds on CPU
         "options": {
             "temperature": temperature,
-            "num_ctx": Config.OLLAMA_NUM_CTX,
+            "num_ctx": min(num_ctx or Config.OLLAMA_NUM_CTX, Config.OLLAMA_NUM_CTX),
             "num_predict": num_predict,
         },
     }

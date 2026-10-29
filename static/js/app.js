@@ -236,10 +236,10 @@
       S.health = await GET("/api/ollama/health");
     } catch (e) { S.health = { ok: false, error: e.message, models: [] }; }
     dot.className = "dot " + (S.health.ok ? "ok" : "bad");
-    txt.textContent = S.health.ok
+    txt.textContent = S.health.backend === "rules" ? "Offline engine · no AI server" : S.health.ok
       ? (S.health.default_model_installed === false ? "Model missing: " + S.health.default_model : "Connected · " + (S.health.default_model || ""))
       : "Not reachable";
-    pill.title = S.health.ok ? (S.health.url + " · v" + S.health.version) : (S.health.error || "");
+    pill.title = S.health.backend === "rules" ? "Summaries are built from the document by rules (AI_BACKEND=rules)" : S.health.ok ? (S.health.url + " · v" + S.health.version) : (S.health.error || "");
   }
 
   // ------------------------------------------------------------------ router
@@ -669,7 +669,7 @@
   async function viewDoc(view, args) {
     var id = args[0];
     var doc = await GET("/api/documents/" + id);
-    D = { doc: doc, current: null, mode: S.user.prefs.mode || "short", length: S.user.prefs.length || "standard", language: S.user.prefs.language || "English", tab: "insights", size: "m", hl: true, chat: [] };
+    D = { doc: doc, current: null, mode: S.user.prefs.mode || "smart", length: S.user.prefs.length || "standard", language: S.user.prefs.language || "English", tab: "insights", size: "m", hl: true, chat: [] };
     if (doc.status !== "ready" && doc.status !== "failed") return renderProcessing(view, doc);
     renderDoc(view);
   }
@@ -935,6 +935,12 @@
       var e = i.expiry, cls = e.status;
       var label = { expired: "Expired " + relDays(e.days_remaining), expiring_soon: "Expires " + relDays(e.days_remaining), valid: "Valid · " + relDays(e.days_remaining), verify: "Expiry needs verification" }[e.status];
       h += '<div class="expiry-card ' + cls + '">' + icon("clock", "lg") + "<div><b>" + esc(label) + "</b><span>" + esc(e.text) + " — " + esc(e.context) + "</span></div></div>";
+    }
+    var fl = (i.fields || []).filter(function (f) { return f.kind !== "date"; });
+    if (fl.length) {
+      h += '<div class="section-title">' + icon("scan", "sm") + 'Key details</div><dl class="facts">' + fl.map(function (f) {
+        return "<dt>" + esc(f.label) + "</dt><dd>" + esc(f.value) + "</dd>";
+      }).join("") + "</dl>";
     }
     var dates = i.dates || [];
     h += '<div class="section-title">' + icon("calendar", "sm") + "Key dates (" + dates.length + ")</div>";

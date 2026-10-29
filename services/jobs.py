@@ -14,7 +14,7 @@ from bson import ObjectId
 
 from config import Config
 from db import get_db, read_file, utcnow
-from services import extractor, insights as insights_mod, plan as plan_mod, summarizer
+from services import extractor, fields as fields_mod, insights as insights_mod, plan as plan_mod, summarizer
 from services.ollama_client import OllamaError
 
 log = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ def create_summary(doc: dict, user: dict, *, mode: str, length: str, language: s
     return get_db().summaries.insert_one({
         "document_id": doc["_id"],
         "user_id": user["_id"],
-        "mode": mode if mode in summarizer.MODES else "short",
+        "mode": mode if mode in summarizer.MODES else Config.DEFAULT_MODE,
         "length": length if length in summarizer.LENGTHS else "standard",
         "language": language if language in summarizer.LANGUAGES else "English",
         "instructions": instructions[:2000],
@@ -85,7 +85,8 @@ def run_summary(summary_id: ObjectId, on_progress=None) -> bool:
 
     started = time.monotonic()
     throttle = _Throttle()
-    _set_summary(summary_id, status="running", progress=2, stage_message="Connecting to Ollama")
+    _set_summary(summary_id, status="running", progress=2,
+                 stage_message="Reading the document" if Config.AI_BACKEND == "rules" else "Connecting to Ollama")
 
     def progress(pct: int, message: str, partial: Optional[str]):
         if on_progress:
@@ -117,6 +118,17 @@ def enqueue_summary(summary_id: ObjectId):
 
 
 # ------------------------------------------------------------------ documents
+def _labelled_expiry(info: dict):
+    """Prefer an explicitly labelled "Valid till / Expiry" field over a date that merely sits near such words."""
+    exp = next((f for f in info["fields"] if f["key"] == "expiry_date"), None)
+    if not exp:
+        return None
+    days = exp["days_from_today"]
+    status = "expired" if days < 0 else "expiring_soon" if days <= Config.EXPIRING_SOON_DAYS else "valid"
+    return {"date": exp["iso"], "text": exp["value"], "days_remaining": days,
+            "status": "verify" if exp.get("ambiguous") else status, "context": f"{exp['label']}: {exp['value']}"}
+
+
 def process_document(doc_id: ObjectId):
     db = get_db()
     doc = db.documents.find_one({"_id": doc_id})
@@ -146,6 +158,8 @@ def process_document(doc_id: ObjectId):
                  ocr_used=result.ocr_used, ocr_engine=result.ocr_engine)
 
         info = insights_mod.analyze(text, soon_days=Config.EXPIRING_SOON_DAYS)
+        info["fields"] = fields_mod.extract_fields(text)
+        info["expiry"] = _labelled_expiry(info) or info.get("expiry")
         is_plan = plan_mod.detect_plan(text) is not None
         _set_doc(doc_id, progress=64, stage_message="Document analysed", insights=info,
                  doc_type=info["doc_type"], word_count=info["stats"]["words"], is_plan=is_plan,
@@ -159,7 +173,7 @@ def process_document(doc_id: ObjectId):
                  stage_message="Generating AI summary")
         summary_id = create_summary(
             doc, user,
-            mode=doc.get("auto_mode") or prefs.get("mode", "short"),
+            mode=doc.get("auto_mode") or prefs.get("mode") or Config.DEFAULT_MODE,
             length=doc.get("auto_length") or "standard",
             language=doc.get("auto_language") or prefs.get("language", "English"),
         )
@@ -206,6 +220,7 @@ def run_chat(message_id: ObjectId):
         answer = summarizer.answer_question(
             doc.get("text") or "", question, history,
             language=msg.get("language", "English"), model=msg.get("model"), on_token=on_token,
+            insights=doc.get("insights") or {},
         )
         db.chat_messages.update_one({"_id": message_id}, {"$set": {"status": "done", "content": answer}})
     except Exception as exc:
