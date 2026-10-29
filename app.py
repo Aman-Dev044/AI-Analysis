@@ -15,6 +15,7 @@ from werkzeug.utils import secure_filename
 
 from config import Config
 from db import delete_file, get_db, init_db, iso, log_activity, oid, put_file, read_file, recent_activity, utcnow
+from services.google_calendar import google_calendar_bp
 from services import jobs, ollama_client, summarizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -23,6 +24,7 @@ log = logging.getLogger("documind")
 app = Flask(__name__)
 app.config.from_object(Config)
 app.permanent_session_lifetime = timedelta(seconds=Config.PERMANENT_SESSION_LIFETIME)
+app.register_blueprint(google_calendar_bp)
 
 INLINE_TYPES = {"application/pdf", "text/plain", "text/csv", "text/markdown",
                 "image/png", "image/jpeg", "image/bmp", "image/tiff", "image/webp"}
@@ -386,6 +388,8 @@ def get_doc(user, doc_id):
     out = doc_brief(doc)
     out.update({
         "insights": doc.get("insights"),
+        "calendar_event_status": doc.get("calendar_event_status"),
+        "calendar_events": doc.get("calendar_events", []),
         "summaries": summaries,
         "plan": jobs.plan_for(doc.get("text") or "") if doc.get("is_plan") else None,
         "has_text": bool(doc.get("text")),

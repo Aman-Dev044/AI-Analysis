@@ -14,7 +14,7 @@ from bson import ObjectId
 
 from config import Config
 from db import get_db, read_file, utcnow
-from services import extractor, fields as fields_mod, insights as insights_mod, plan as plan_mod, summarizer
+from services import extractor, fields as fields_mod, google_calendar, insights as insights_mod, plan as plan_mod, summarizer
 from services.ollama_client import OllamaError
 
 log = logging.getLogger(__name__)
@@ -164,6 +164,23 @@ def process_document(doc_id: ObjectId):
         _set_doc(doc_id, progress=64, stage_message="Document analysed", insights=info,
                  doc_type=info["doc_type"], word_count=info["stats"]["words"], is_plan=is_plan,
                  expiry=info.get("expiry"))
+        try:
+            calendar_result = google_calendar.sync_document_events(
+                user, str(doc_id), doc.get("title") or doc.get("filename") or "Document",
+                info.get("dates") or [],
+            )
+            _set_doc(
+                doc_id,
+                calendar_event_status=calendar_result["status"],
+                calendar_events=calendar_result["events"],
+            )
+        except Exception:
+            log.exception("Google Calendar event sync failed for document %s", doc_id)
+            _set_doc(
+                doc_id,
+                calendar_event_status="failed",
+                calendar_events=[],
+            )
 
         if not doc.get("auto_summary", True):
             _set_doc(doc_id, status="ready", stage="ready", progress=100, stage_message="Ready")

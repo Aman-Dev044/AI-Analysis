@@ -65,6 +65,9 @@ database with `python seed.py --set-password` (users can also change it from **S
 | `OLLAMA_API_KEY` | empty | optional Bearer token for a reverse proxy |
 | `OLLAMA_NUM_CTX`, `OLLAMA_TIMEOUT_SECONDS` | `8192`, `600` | context window and request timeout |
 | `OLLAMA_VISION_MODEL` | empty | e.g. `qwen2.5vl:3b` for OCR via Ollama |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | empty | Google OAuth web application credentials |
+| `GOOGLE_REDIRECT_URI` | `http://localhost:5000/google-calendar/callback` | Must exactly match the OAuth client redirect URI |
+| `GOOGLE_TOKEN_ENCRYPTION_KEY` | empty | Fernet key used to encrypt saved Google refresh tokens |
 | `OCR_ENGINE`, `TESSERACT_CMD` | `auto` | `auto` (rapid → paddle → tesseract → ollama), or one of `rapid`, `paddle`, `tesseract`, `ollama`, `off` |
 | `CHUNK_CHARS`, `MAX_CHUNKS` | `12000`, `40` | long-document chunking |
 | `LONG_DOC_STRATEGY` | `extractive` | `extractive` (key sentences, fast) or `mapreduce` (model reads every part, slow on CPU) |
@@ -73,6 +76,20 @@ database with `python seed.py --set-password` (users can also change it from **S
 | `OLLAMA_KEEP_ALIVE` | `30m` | keep the model in RAM between requests |
 | `MAX_UPLOAD_MB`, `WORKERS` | `25`, `2` | upload limit, parallel background jobs |
 | `SEED_ADMIN_*` | | seeded login |
+
+### Google Calendar connection
+
+Enable the Google Calendar API, configure the OAuth consent screen, and create a **Web application** OAuth client.
+Set its authorized redirect URI to the exact value of `GOOGLE_REDIRECT_URI`, then add the client ID and secret to
+`.env` and replace the Flask `SECRET_KEY` placeholder with a strong random value. Generate a Fernet key with
+`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` and set it as
+`GOOGLE_TOKEN_ENCRYPTION_KEY`. Keep this key stable so saved tokens remain decryptable. Restart the app after editing
+`.env`. The Settings connection requests only the `calendar.events` scope; OAuth tokens are encrypted before being
+stored on the user's MongoDB record. After connection, document processing can add upcoming meetings, travel,
+family get-togethers and explicitly high-priority scheduled tasks with a date. Other date mentions and
+low/medium-priority tasks are not added. Events with a stated time use the primary calendar's time zone; when
+no time is present, the event is all-day. Reprocessing uses deterministic event IDs to avoid duplicates. Do not
+commit `.env` or share the client secret or encryption key.
 
 ## MongoDB collections
 

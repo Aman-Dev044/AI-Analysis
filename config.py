@@ -46,6 +46,14 @@ class Config:
     OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "")
     OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 
+    # Google Calendar OAuth
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    GOOGLE_REDIRECT_URI = os.getenv(
+        "GOOGLE_REDIRECT_URI", "http://localhost:5000/google-calendar/callback"
+    )
+    GOOGLE_TOKEN_ENCRYPTION_KEY = os.getenv("GOOGLE_TOKEN_ENCRYPTION_KEY", "")
+
     # Summarisation
     CHUNK_CHARS = _int("CHUNK_CHARS", 12000)  # text per model call before map-reduce
     MAX_CHUNKS = _int("MAX_CHUNKS", 40)

@@ -949,6 +949,23 @@
         '<span class="badge">' + esc(d.label) + "</span>" + (d.ambiguous ? ' <span class="badge warn">check format</span>' : "") +
         ' <span class="muted" style="font-size:11.5px">' + relDays(d.days_from_today) + "</span><p>" + esc(d.context) + "</p></div>";
     }).join("") + "</div>" : '<p class="muted" style="font-size:13px">No dates detected.</p>';
+    var calendarEvents = doc.calendar_events || [];
+    if (doc.calendar_event_status && doc.calendar_event_status !== "no_events") {
+      h += '<div class="section-title">' + icon("calendar", "sm") + "Google Calendar events</div>";
+      if (calendarEvents.length) {
+        h += '<div class="timeline">' + calendarEvents.map(function (event) {
+          return '<div class="tl-item ' + (event.status === "created" ? "review" : "past") + '"><b>' +
+            esc(fmtDate(event.date, { day: "numeric", month: "short", year: "numeric" })) + "</b> " +
+            '<span class="badge">' + esc(event.status) + '</span><p><b>' + esc(event.title) + "</b><br>" +
+            esc(event.message || "") + "</p></div>";
+        }).join("") + "</div>";
+      } else {
+        var calendarMessage = doc.calendar_event_status === "not_connected"
+          ? "Connect Google Calendar in Settings to add detected events."
+          : "No event was added. Check Calendar connection and server logs.";
+        h += '<p class="muted" style="font-size:13px">' + calendarMessage + "</p>";
+      }
+    }
     function chips(title, ic, arr, cls) {
       if (!arr || !arr.length) return "";
       return '<div class="section-title">' + icon(ic, "sm") + title + '</div><div class="chips">' + arr.map(function (x) { return '<span class="chip ' + (cls || "") + '">' + esc(x) + "</span>"; }).join("") + "</div>";
@@ -1045,6 +1062,7 @@
   // ================================================================== SETTINGS
   async function viewSettings(view) {
     await checkHealth();
+    var calendar = await GET("/api/google-calendar/status");
     var h = S.health, p = S.user.prefs, m = S.meta;
     var models = h.models && h.models.length ? h.models : [m.default_model];
     view.innerHTML = '<div class="page-head"><div><h1>Settings</h1><p>Profile, summary defaults and AI connection.</p></div></div>' +
@@ -1054,6 +1072,18 @@
       (h.ok ? "" : '<p class="muted" style="font-size:13px">' + esc(h.error || "") + "<br>Set <code>OLLAMA_URL</code> in <code>.env</code> to your VPS address (e.g. <code>http://YOUR_VPS_IP:11434</code>) and make sure port 11434 is reachable.</p>") +
       (h.ok && h.default_model_installed === false ? '<div class="error-box">' + icon("alert", "sm") + "<span>Default model <b>" + esc(h.default_model) + "</b> is not installed on the server. Run <code>ollama pull " + esc(h.default_model) + "</code> on the VPS or choose another model below.</span></div>" : "") +
       '<div class="section-title">Installed models (' + (h.models || []).length + ')</div><div class="chips">' + (h.models || []).map(function (x) { return '<span class="chip">' + esc(x) + "</span>"; }).join("") + "</div></div></section>" +
+
+      '<section class="card"><div class="card-head"><h3>' + icon("calendar") + 'Google Calendar</h3></div><div class="card-pad">' +
+      '<div class="expiry-card ' + (calendar.connected ? "valid" : "expired") + '">' + icon(calendar.connected ? "tick" : "calendar", "lg") +
+      "<div><b>" + (calendar.connected ? "Connected" : "Not connected") + "</b><span>" +
+      (calendar.configured ? (calendar.connected ? "Calendar permission is saved for this account." : "Connect your Google account to allow calendar events.") :
+        "OAuth setup is incomplete. Add Google credentials, a strong SECRET_KEY and token encryption key to .env.") + "</span></div></div>" +
+      (calendar.connected
+        ? '<button class="btn danger" id="disconnectCalendar">' + icon("x", "sm") + "Disconnect Google Calendar</button>"
+        : '<button class="btn primary" id="connectCalendar"' + (calendar.configured ? "" : " disabled") + ">" +
+          icon("external", "sm") + "Connect Google Calendar</button>") +
+      '<p class="muted" style="font-size:12px;margin-bottom:0">When connected, uploaded documents are checked for upcoming meetings, travel, family get-togethers and explicitly high-priority scheduled tasks. Matching events are added automatically; dates without a stated time become all-day events. Other dates and low/medium-priority tasks are not added. Disconnecting removes the saved connection from this app.</p>' +
+      "</div></section>" +
 
       '<section class="card"><div class="card-head"><h3>' + icon("sparkles") + 'Summary defaults</h3></div><form class="card-pad" id="prefsForm">' +
       '<div class="field"><label for="pName">Display name</label><input class="input" id="pName" value="' + esc(S.user.name) + '"></div>' +
@@ -1072,6 +1102,25 @@
       '<button class="btn danger" id="logout2">' + icon("logout", "sm") + "Sign out</button></div></section></div>";
 
     $("#testBtn").addEventListener("click", function () { route(); });
+    var calendarNotice = new URLSearchParams(location.search).get("google_calendar");
+    if (calendarNotice) {
+      history.replaceState(null, "", location.pathname + location.hash);
+      if (calendarNotice === "connected") toast("Google Calendar connected", "ok");
+      else if (calendarNotice === "denied") toast("Google Calendar access was not granted.", "bad");
+      else toast("Could not connect Google Calendar. Check OAuth settings and server logs.", "bad");
+    }
+    var connectCalendar = $("#connectCalendar");
+    if (connectCalendar) connectCalendar.addEventListener("click", function () {
+      location.assign("/google-calendar/connect");
+    });
+    var disconnectCalendar = $("#disconnectCalendar");
+    if (disconnectCalendar) disconnectCalendar.addEventListener("click", async function () {
+      try {
+        await POST("/api/google-calendar/disconnect");
+        toast("Google Calendar disconnected", "ok");
+        route();
+      } catch (err) { toast(err.message, "bad"); }
+    });
     $("#prefsForm").addEventListener("submit", async function (e) {
       e.preventDefault();
       try {
