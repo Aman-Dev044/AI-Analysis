@@ -294,7 +294,7 @@ class RuleBasedTests(unittest.TestCase):
 
 
 class GoogleCalendarTests(unittest.TestCase):
-    def test_calendar_events_include_only_upcoming_actual_events(self):
+    def test_calendar_events_include_all_upcoming_unambiguous_dates(self):
         events = google_calendar.build_calendar_events(
             "doc-1",
             "Trip notes",
@@ -324,13 +324,73 @@ class GoogleCalendarTests(unittest.TestCase):
             today=date(2027, 1, 1),
         )
 
-        self.assertEqual(len(events), 4)
+        self.assertEqual(len(events), 6)
         self.assertEqual(events[0]["start_local"], "2027-01-05T21:30")
         self.assertNotIn("start", events[0])
         self.assertEqual(events[1]["start"], {"date": "2027-01-06"})
         self.assertEqual(events[1]["end"], {"date": "2027-01-07"})
         self.assertIn("family", events[2]["summary"].lower())
-        self.assertEqual(events[3]["summary"], "High priority - Review weekly goals and outstanding tasks")
+        self.assertIn("deadline", events[3]["summary"].lower())
+        self.assertEqual(events[4]["summary"], "High priority - Review weekly goals and outstanding tasks")
+        self.assertIn("routine notes", events[5]["summary"].lower())
+
+    def test_calendar_event_created_for_validity_date_without_event_keyword(self):
+        events = google_calendar.build_calendar_events(
+            "doc-2",
+            "Membership document",
+            [{
+                "iso": "2027-03-15",
+                "label": "expiry",
+                "context": "Membership validity until 15 March 2027",
+                "event_context": "Membership validity until 15 March 2027",
+            }],
+            today=date(2027, 1, 1),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertIn("validity / expiry", events[0]["summary"].lower())
+        self.assertEqual(events[0]["start"], {"date": "2027-03-15"})
+
+    def test_calendar_date_extraction_can_keep_all_same_date_rows(self):
+        source = "\n".join([
+            "Team meeting on 15 March 2027 at 9:00 AM.",
+            "Flight departure on 15 March 2027 at 2:30 PM.",
+        ])
+
+        dates = insights.extract_dates(
+            source, today=date(2027, 1, 1), limit=None, deduplicate=False,
+        )
+        events = google_calendar.build_calendar_events(
+            "doc-3", "Itinerary", dates, today=date(2027, 1, 1),
+        )
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["start_local"], "2027-03-15T09:00")
+        self.assertEqual(events[1]["start_local"], "2027-03-15T14:30")
+
+    def test_calendar_sync_reports_each_event_status_through_callback(self):
+        events = []
+        with mock.patch.object(google_calendar, "_calendar_access_token", return_value="token"), \
+                mock.patch.object(google_calendar.requests, "post") as post:
+            post.return_value.status_code = 200
+            post.return_value.ok = True
+            result = google_calendar.sync_document_events(
+                {"google_calendar": {"token_encrypted": "encrypted"}},
+                "doc-4",
+                "Membership",
+                [{
+                    "iso": "2027-03-15",
+                    "label": "expiry",
+                    "context": "Membership expires on 15 March 2027",
+                }],
+                today=date(2027, 1, 1),
+                on_event_update=events.append,
+            )
+
+        self.assertEqual(result["status"], "created")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["status"], "created")
+        self.assertEqual(events[0]["id"], result["events"][0]["id"])
 
     def test_calendar_event_context_preserves_full_schedule_row(self):
         source = (
@@ -341,6 +401,24 @@ class GoogleCalendarTests(unittest.TestCase):
 
         self.assertEqual(len(info), 1)
         self.assertIn("| High | Not Started", info[0]["event_context"])
+
+    def test_calendar_schedule_scans_each_same_day_row_and_uses_time_range(self):
+        source = "\n".join([
+            "Date | Time | Scheduled Activity | Category | Priority",
+            "2026-10-30 | 06:30–07:00 | Wake up and set priorities | Personal | Suggested plan",
+            "2026-10-30 | 10:30–11:15 | Weekly kickoff / team planning meeting | Meeting | Medium",
+        ])
+        table = tabular.parse(source)
+        events = google_calendar.build_calendar_events(
+            "doc-1", "Monthly schedule", [], today=date(2026, 10, 30), schedule_table=table,
+        )
+
+        self.assertEqual(len(events), 2)
+        meeting = next(event for event in events if "Weekly kickoff" in event["summary"])
+        self.assertEqual(meeting["summary"], "Meeting - Weekly kickoff / team planning meeting")
+        self.assertEqual(meeting["start_local"], "2026-10-30T10:30")
+        self.assertEqual(meeting["end_local"], "2026-10-30T11:15")
+        self.assertTrue(any("Wake up and set priorities" in event["summary"] for event in events))
 
     def test_oauth_flow_restores_pkce_code_verifier(self):
         from unittest.mock import patch

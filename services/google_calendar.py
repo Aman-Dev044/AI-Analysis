@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from datetime import date, datetime, time, timedelta
 from typing import Optional
@@ -17,6 +18,8 @@ import requests
 
 from config import Config
 from db import get_db, oid, utcnow
+from services import tabular
+from services.insights import parse_date
 
 log = logging.getLogger(__name__)
 google_calendar_bp = Blueprint("google_calendar", __name__)
@@ -33,6 +36,11 @@ _EVENT_TYPES = (
         r"\b(family\s+(?:get[- ]?together|gathering|reunion|event|celebration)|get[- ]?together)\b",
         re.I,
     )),
+    ("validity / expiry", re.compile(
+        r"\b(expir\w*|valid(?:ity)?\s+(?:until|till|through|thru|upto|up to)|renew\w*)\b", re.I
+    )),
+    ("deadline", re.compile(r"\b(deadline|due date|submit by|last date)\b", re.I)),
+    ("review", re.compile(r"\b(review|hearing|exam)\b", re.I)),
 )
 _HIGH_PRIORITY_FIELD_RE = re.compile(
     r"(?:^|[|,;\t])\s*(?:priority\s*[:=]\s*)?high\s*(?:[|,;\t]|$)", re.I
@@ -79,10 +87,7 @@ def _decrypt_token(token_ciphertext: str, key: bytes) -> str:
         raise RuntimeError("Stored Google Calendar credentials could not be decrypted.") from exc
 
 
-def _event_time(context: str) -> Optional[time]:
-    match = _TIME_RE.search(context)
-    if not match:
-        return None
+def _parse_time_match(match) -> time:
     if match.group("hour24") is not None:
         return time(int(match.group("hour24")), int(match.group("minute24")))
     hour = int(match.group("hour"))
@@ -130,17 +135,56 @@ def _high_priority_title(context: str) -> Optional[str]:
     return None
 
 
+def _event_type(context: str, label: str, high_priority_title: Optional[str]) -> str:
+    if high_priority_title:
+        return "high priority task"
+    matched_type = next(
+        (name for name, pattern in _EVENT_TYPES if pattern.search(context)),
+        None,
+    )
+    if matched_type:
+        return matched_type
+    return {
+        "expiry": "validity / expiry",
+        "deadline": "deadline",
+        "review": "review",
+        "issue": "document date",
+        "birth": "birthday",
+    }.get(label, "date reminder")
+
+
 def build_calendar_events(
     document_id: str,
     document_title: str,
     dates: list[dict],
     today: Optional[date] = None,
+    schedule_table: Optional[dict] = None,
 ) -> list[dict]:
-    """Build source-grounded upcoming events and explicitly high-priority scheduled tasks."""
+    """Build calendar events for every unambiguous date on or after today."""
     today = today or date.today()
     events = []
     seen = set()
-    for item in dates:
+    schedule_info = tabular.analyze(schedule_table, today) if schedule_table else None
+    is_schedule = bool(schedule_info and tabular.doc_type(schedule_info) == "Schedule")
+    if is_schedule:
+        date_index = schedule_info["date_col"]["index"]
+        task_column = schedule_info["roles"]["task"]
+        schedule_items = []
+        for row in schedule_info["rows"]:
+            event_date, ambiguous = parse_date(row[date_index])
+            if not event_date:
+                continue
+            context = " | ".join(row)
+            schedule_items.append({
+                "iso": event_date.isoformat(),
+                "ambiguous": ambiguous,
+                "event_context": context,
+                "event_title": row[task_column["index"]],
+            })
+    else:
+        schedule_items = dates
+
+    for item in schedule_items:
         if item.get("ambiguous"):
             continue
         try:
@@ -152,13 +196,7 @@ def build_calendar_events(
 
         context = " ".join(str(item.get("event_context") or item.get("context") or "").split())
         high_priority_title = _high_priority_title(context)
-        event_type = "high priority task" if high_priority_title else next(
-            (label for label, pattern in _EVENT_TYPES if pattern.search(context)),
-            None,
-        )
-        if not event_type:
-            continue
-        event_time = _event_time(context)
+        event_type = _event_type(context, str(item.get("label") or ""), high_priority_title)
         identity = f"{document_id}|{event_date.isoformat()}|{event_type}|{context.lower()}"
         if identity in seen:
             continue
@@ -167,7 +205,7 @@ def build_calendar_events(
         summary = (
             f"High priority - {high_priority_title}"
             if high_priority_title
-            else f"{event_type.title()} - {document_title}".strip(" -")
+            else f"{event_type.title()} - {item.get('event_title') or item.get('context') or context or document_title}".strip(" -")
         )
         event = {
             "id": "a" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
@@ -178,9 +216,18 @@ def build_calendar_events(
             "source_date": event_date.isoformat(),
             "source_type": event_type,
         }
-        if event_time:
+        time_matches = list(_TIME_RE.finditer(context))
+        if time_matches:
+            event_time = _parse_time_match(time_matches[0])
+            event_end_time = (
+                _parse_time_match(time_matches[1])
+                if len(time_matches) > 1
+                else (datetime.combine(event_date, event_time) + timedelta(hours=1)).time()
+            )
             start = datetime.combine(event_date, event_time)
-            end = start + timedelta(hours=1)
+            end = datetime.combine(event_date, event_end_time)
+            if end <= start:
+                end += timedelta(days=1)
             event["start_local"] = start.isoformat(timespec="minutes")
             event["end_local"] = end.isoformat(timespec="minutes")
         else:
@@ -228,13 +275,35 @@ def _calendar_access_token(user: dict) -> str:
     return token_data["token"]
 
 
-def sync_document_events(user: dict, document_id: str, document_title: str, dates: list[dict]) -> dict:
-    """Create eligible events in the user's primary calendar and report per-event outcomes."""
-    events = build_calendar_events(document_id, document_title, dates)
+def sync_document_events(
+    user: dict,
+    document_id: str,
+    document_title: str,
+    dates: list[dict],
+    schedule_table: Optional[dict] = None,
+    on_event_update=None,
+    today: Optional[date] = None,
+) -> dict:
+    """Create upcoming document-date events in the user's primary calendar."""
+    events = build_calendar_events(
+        document_id, document_title, dates, today=today, schedule_table=schedule_table,
+    )
     if not events:
         return {"status": "no_events", "events": []}
     if not (user.get("google_calendar") or {}).get("token_encrypted"):
-        return {"status": "not_connected", "events": []}
+        outcomes = [{
+            "id": event["id"],
+            "title": event["summary"],
+            "date": event["source_date"],
+            "start_local": event.get("start_local"),
+            "end_local": event.get("end_local"),
+            "status": "not_connected",
+            "message": "Connect Google Calendar to add this event.",
+        } for event in events]
+        if on_event_update:
+            for outcome in outcomes:
+                on_event_update(outcome)
+        return {"status": "not_connected", "events": outcomes}
 
     try:
         token = _calendar_access_token(user)
@@ -253,18 +322,21 @@ def sync_document_events(user: dict, document_id: str, document_title: str, date
                 raise RuntimeError("Could not determine the primary Calendar time zone.")
     except Exception as exc:
         log.error("Google Calendar setup failed (%s)", type(exc).__name__)
-        return {
+        outcomes = [{
+            "id": event["id"],
+            "title": event["summary"],
+            "date": event["source_date"],
+            "start_local": event.get("start_local"),
+            "end_local": event.get("end_local"),
             "status": "failed",
-            "events": [{
-                "title": event["summary"],
-                "date": event["source_date"],
-                "status": "failed",
-                "message": str(exc)[:240],
-            } for event in events],
-        }
+            "message": str(exc)[:240],
+        } for event in events]
+        if on_event_update:
+            for outcome in outcomes:
+                on_event_update(outcome)
+        return {"status": "failed", "events": outcomes}
 
-    outcomes = []
-    for event in events:
+    def insert_event(event):
         payload = {
             "id": event["id"],
             "summary": event["summary"],
@@ -293,12 +365,21 @@ def sync_document_events(user: dict, document_id: str, document_title: str, date
         except requests.RequestException as exc:
             status, message = "failed", f"Google Calendar request failed ({type(exc).__name__})."
             log.error("Google Calendar event insert request failed (%s)", type(exc).__name__)
-        outcomes.append({
+        outcome = {
+            "id": event["id"],
             "title": event["summary"],
             "date": event["source_date"],
+            "start_local": event.get("start_local"),
+            "end_local": event.get("end_local"),
             "status": status,
             "message": message,
-        })
+        }
+        if on_event_update:
+            on_event_update(outcome)
+        return outcome
+
+    with ThreadPoolExecutor(max_workers=min(8, len(events))) as executor:
+        outcomes = list(executor.map(insert_event, events))
 
     statuses = {event["status"] for event in outcomes}
     result_status = "created" if statuses == {"created"} else "partial" if "created" in statuses else "failed"

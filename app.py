@@ -405,6 +405,8 @@ def get_doc(user, doc_id):
 def doc_status(user, doc_id):
     doc = owned_doc(user, doc_id, {"text": 0})
     out = doc_brief(doc)
+    out["calendar_event_status"] = doc.get("calendar_event_status")
+    out["calendar_events"] = doc.get("calendar_events", [])
     if doc.get("auto_summary_id"):
         s = get_db().summaries.find_one({"_id": doc["auto_summary_id"]})
         out["summary"] = summary_out(s) if s else None
@@ -451,7 +453,8 @@ def reprocess(user, doc_id):
         return api_error("This document is still being processed.", 409)
     get_db().documents.update_one({"_id": doc["_id"]}, {"$set": {
         "status": "queued", "stage": "queued", "progress": 3, "stage_message": "Waiting in queue",
-        "error": None, "summary_failed": False, "updated_at": utcnow()}})
+        "error": None, "summary_failed": False, "calendar_event_status": "pending",
+        "calendar_events": [], "updated_at": utcnow()}})
     log_activity(user["_id"], "reprocess", f"Reprocessed {doc.get('title')}", doc["_id"])
     jobs.enqueue_document(doc["_id"])
     return jsonify({"ok": True})

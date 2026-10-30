@@ -119,7 +119,12 @@ def _label_for(text: str, start: int) -> str:
     return best
 
 
-def extract_dates(text: str, today: Optional[date] = None, limit: int = 80) -> list[dict]:
+def extract_dates(
+    text: str,
+    today: Optional[date] = None,
+    limit: Optional[int] = 80,
+    deduplicate: bool = True,
+) -> list[dict]:
     today = today or date.today()
     seen, out = set(), []
     for match in DATE_RE.finditer(text):
@@ -128,7 +133,9 @@ def extract_dates(text: str, today: Optional[date] = None, limit: int = 80) -> l
         if parsed is None or not (1900 <= parsed.year <= 2200):
             continue
         label = _label_for(text, match.start())
-        key = (parsed, label)
+        context = _context(text, match.start(), match.end())
+        event_context = _event_context(text, match.start(), match.end())
+        key = (parsed, label) if deduplicate else (parsed, label, context, event_context)
         if key in seen:
             continue
         seen.add(key)
@@ -138,10 +145,10 @@ def extract_dates(text: str, today: Optional[date] = None, limit: int = 80) -> l
             "label": label,
             "ambiguous": ambiguous,
             "days_from_today": (parsed - today).days,
-            "context": _context(text, match.start(), match.end()),
-            "event_context": _event_context(text, match.start(), match.end()),
+            "context": context,
+            "event_context": event_context,
         })
-        if len(out) >= limit:
+        if limit is not None and len(out) >= limit:
             break
     out.sort(key=lambda d: d["iso"])
     return out

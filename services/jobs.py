@@ -217,6 +217,7 @@ def process_document(doc_id: ObjectId):
                  ocr_used=result.ocr_used, ocr_engine=result.ocr_engine)
 
         info = insights_mod.analyze(text, soon_days=Config.EXPIRING_SOON_DAYS)
+        calendar_dates = insights_mod.extract_dates(text, limit=None, deduplicate=False)
         table = tabular.parse(text)
         if table:  # a spreadsheet: its rows are data, not "Label: value" fields or prose
             info["doc_type"] = tabular.doc_type(tabular.analyze(table))
@@ -228,10 +229,35 @@ def process_document(doc_id: ObjectId):
         _set_doc(doc_id, progress=64, stage_message="Document analysed", insights=info,
                  doc_type=info["doc_type"], word_count=info["stats"]["words"], is_plan=is_plan,
                  expiry=info.get("expiry"))
+        calendar_candidates = google_calendar.build_calendar_events(
+            str(doc_id), doc.get("title") or doc.get("filename") or "Document",
+            calendar_dates, schedule_table=table,
+        )
+        pending_events = [{
+            "id": event["id"],
+            "title": event["summary"],
+            "date": event["source_date"],
+            "start_local": event.get("start_local"),
+            "end_local": event.get("end_local"),
+            "status": "pending",
+            "message": "Waiting to sync with Google Calendar.",
+        } for event in calendar_candidates]
+        _set_doc(
+            doc_id,
+            calendar_event_status="pending" if pending_events else "no_events",
+            calendar_events=pending_events,
+        )
+
+        def save_calendar_event(outcome: dict):
+            db.documents.update_one(
+                {"_id": doc_id, "calendar_events.id": outcome["id"]},
+                {"$set": {"calendar_events.$": outcome}},
+            )
+
         try:
             calendar_result = google_calendar.sync_document_events(
                 user, str(doc_id), doc.get("title") or doc.get("filename") or "Document",
-                info.get("dates") or [],
+                calendar_dates, schedule_table=table, on_event_update=save_calendar_event,
             )
             _set_doc(
                 doc_id,
@@ -240,10 +266,26 @@ def process_document(doc_id: ObjectId):
             )
         except Exception:
             log.exception("Google Calendar event sync failed for document %s", doc_id)
+            saved_doc = db.documents.find_one({"_id": doc_id}, {"calendar_events": 1}) or {}
+            saved_events = {
+                event.get("id"): event for event in saved_doc.get("calendar_events", [])
+            }
+
+            def failed_calendar_event(event: dict) -> dict:
+                saved_event = saved_events.get(event["id"], event)
+                if saved_event.get("status") == "pending":
+                    return {
+                        **saved_event,
+                        "status": "failed",
+                        "message": "Calendar sync failed. Check the server logs.",
+                    }
+                return saved_event
+
+            failed_events = [failed_calendar_event(event) for event in pending_events]
             _set_doc(
                 doc_id,
                 calendar_event_status="failed",
-                calendar_events=[],
+                calendar_events=failed_events,
             )
 
         if not doc.get("auto_summary", True):

@@ -729,7 +729,7 @@
   function renderProcessing(view, doc) {
     view.innerHTML = docHeader(doc) +
       '<section class="card card-pad" style="max-width:820px"><h3 style="margin:0 0 4px">Processing your document…</h3><p class="muted" style="margin:0">You can leave this page — processing continues in the background.</p>' +
-      '<div id="procBox"><div class="bar live" style="margin-top:18px"><i></i></div><div data-slot="status"></div><div data-slot="preview"></div></div></section>';
+      '<div id="procBox"><div class="bar live" style="margin-top:18px"><i></i></div><div data-slot="status"></div><div data-slot="preview"></div><div data-slot="calendar"></div></div></section>';
     bindHeader(doc);
     var paint = function (s) {
       var box = $("#procBox"); if (!box) return;
@@ -737,6 +737,7 @@
       setHTML(slot(box, "status"), stepper(s.stage) +
         '<div class="job-msg"><span>' + esc(s.stage_message || "") + "</span><span>" + (s.progress || 0) + "%</span></div>");
       updatePreview(slot(box, "preview"), s.summary);
+      setHTML(slot(box, "calendar"), calendarEventsMarkup(s.calendar_event_status, s.calendar_events));
     };
     paint(doc);
     every(900, async function () {
@@ -781,12 +782,60 @@
     });
   }
 
+  function calendarEventsMarkup(status, events) {
+    if (!status) return "";
+    events = events || [];
+    var counts = events.reduce(function (acc, event) {
+      acc[event.status] = (acc[event.status] || 0) + 1;
+      return acc;
+    }, {});
+    var statusText = {
+      pending: "Pending",
+      created: "Successful",
+      failed: "Failed",
+      not_connected: "Not connected"
+    };
+    var overall = status === "pending" ? "Syncing events…" :
+      status === "created" ? "All events synced successfully." :
+      status === "partial" ? "Some events synced; check failed items." :
+      status === "not_connected" ? "Connect Google Calendar to add these events." :
+      status === "no_events" ? "No upcoming unambiguous dates were found in this document." :
+      "Calendar sync failed. Check the failed items or server logs.";
+    var countsText = [
+      counts.created ? counts.created + " successful" : "",
+      counts.pending ? counts.pending + " pending" : "",
+      counts.failed ? counts.failed + " failed" : "",
+      counts.not_connected ? counts.not_connected + " not connected" : ""
+    ].filter(Boolean).join(" · ");
+    var html = '<div class="section-title">' + icon("calendar", "sm") + "Google Calendar events</div>" +
+      '<p class="muted" style="font-size:13px">' + esc(overall) +
+      (countsText ? " " + esc(countsText) + "." : "") + "</p>";
+    if (!events.length) return html;
+    html += '<details><summary style="cursor:pointer;font-size:13px;font-weight:700;margin-bottom:8px">View ' +
+      events.length + " event" + (events.length === 1 ? "" : "s") + "</summary><div class=\"timeline\">";
+    html += events.map(function (event) {
+      var state = event.status || "pending";
+      var stateClass = state === "created" ? "ok" : state === "failed" ? "bad" :
+        state === "pending" || state === "not_connected" ? "warn" : "";
+      var stateLabel = statusText[state] || state;
+      var timeRange = event.start_local
+        ? " · " + event.start_local.slice(11, 16) + (event.end_local ? "–" + event.end_local.slice(11, 16) : "")
+        : " · All day";
+      return '<div class="tl-item"><b>' +
+        esc(fmtDate(event.date, { day: "numeric", month: "short", year: "numeric" })) +
+        esc(timeRange) + '</b> <span class="badge ' + stateClass + '">' + esc(stateLabel) +
+        '</span><p><b>' + esc(event.title || "") + "</b><br>" + esc(event.message || "") + "</p></div>";
+    }).join("") + "</div></details>";
+    return html;
+  }
+
   function renderDoc(view) {
     var doc = D.doc, m = S.meta;
     if (doc.status === "failed") {
       view.innerHTML = docHeader(doc) + '<section class="card card-pad" style="max-width:760px"><div class="error-box" style="margin:0">' + icon("alert") +
         "<div><b>Processing failed</b><br>" + esc(doc.error || "Unknown error") + "</div></div>" +
-        '<p class="muted">Check that the file is readable and that Ollama / OCR are configured, then reprocess.</p></section>';
+        '<p class="muted">Check that the file is readable and that Ollama / OCR are configured, then reprocess.</p>' +
+        calendarEventsMarkup(doc.calendar_event_status, doc.calendar_events) + "</section>";
       bindHeader(doc);
       return;
     }
@@ -1010,23 +1059,7 @@
         '<span class="badge">' + esc(d.label) + "</span>" + (d.ambiguous ? ' <span class="badge warn">check format</span>' : "") +
         ' <span class="muted" style="font-size:11.5px">' + relDays(d.days_from_today) + "</span><p>" + esc(d.context) + "</p></div>";
     }).join("") + "</div>" : '<p class="muted" style="font-size:13px">No dates detected.</p>';
-    var calendarEvents = doc.calendar_events || [];
-    if (doc.calendar_event_status && doc.calendar_event_status !== "no_events") {
-      h += '<div class="section-title">' + icon("calendar", "sm") + "Google Calendar events</div>";
-      if (calendarEvents.length) {
-        h += '<div class="timeline">' + calendarEvents.map(function (event) {
-          return '<div class="tl-item ' + (event.status === "created" ? "review" : "past") + '"><b>' +
-            esc(fmtDate(event.date, { day: "numeric", month: "short", year: "numeric" })) + "</b> " +
-            '<span class="badge">' + esc(event.status) + '</span><p><b>' + esc(event.title) + "</b><br>" +
-            esc(event.message || "") + "</p></div>";
-        }).join("") + "</div>";
-      } else {
-        var calendarMessage = doc.calendar_event_status === "not_connected"
-          ? "Connect Google Calendar in Settings to add detected events."
-          : "No event was added. Check Calendar connection and server logs.";
-        h += '<p class="muted" style="font-size:13px">' + calendarMessage + "</p>";
-      }
-    }
+    h += calendarEventsMarkup(doc.calendar_event_status, doc.calendar_events);
     function chips(title, ic, arr, cls) {
       if (!arr || !arr.length) return "";
       return '<div class="section-title">' + icon(ic, "sm") + title + '</div><div class="chips">' + arr.map(function (x) { return '<span class="chip ' + (cls || "") + '">' + esc(x) + "</span>"; }).join("") + "</div>";
@@ -1146,7 +1179,7 @@
         ? '<button class="btn danger" id="disconnectCalendar">' + icon("x", "sm") + "Disconnect Google Calendar</button>"
         : '<button class="btn primary" id="connectCalendar"' + (calendar.configured ? "" : " disabled") + ">" +
           icon("external", "sm") + "Connect Google Calendar</button>") +
-      '<p class="muted" style="font-size:12px;margin-bottom:0">When connected, uploaded documents are checked for upcoming meetings, travel, family get-togethers and explicitly high-priority scheduled tasks. Matching events are added automatically; dates without a stated time become all-day events. Other dates and low/medium-priority tasks are not added. Disconnecting removes the saved connection from this app.</p>' +
+      '<p class="muted" style="font-size:12px;margin-bottom:0">When connected, every unambiguous date from today onward found in uploaded documents is added to your primary calendar. Schedule rows with a start and end time keep that time range; dates without a time become all-day events. Past and ambiguous dates are skipped. Disconnecting removes the saved connection from this app.</p>' +
       "</div></section>" +
 
       '<section class="card"><div class="card-head"><h3>' + icon("sparkles") + 'Summary defaults</h3></div><form class="card-pad" id="prefsForm">' +
