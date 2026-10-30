@@ -85,9 +85,12 @@ Set its authorized redirect URI to the exact value of `GOOGLE_REDIRECT_URI`, the
 `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` and set it as
 `GOOGLE_TOKEN_ENCRYPTION_KEY`. Keep this key stable so saved tokens remain decryptable. Restart the app after editing
 `.env`. The Settings connection requests only the `calendar.events` scope; OAuth tokens are encrypted before being
-stored on the user's MongoDB record. After connection, document processing adds every unambiguous date from
-today onward found in an uploaded document, including validity/expiry dates, deadlines, meetings, travel and
-dated schedule rows. Past and ambiguous dates are skipped. Events with a stated time use the primary calendar's
+stored on the user's MongoDB record. The app requests `calendar.events` to create entries and
+`calendar.calendars.readonly` to read the primary calendar time zone for timed entries. If these scopes change,
+disconnect and reconnect Google Calendar so Google grants the updated permissions. After connection, document
+processing adds unambiguous dates from today onward, including validity/expiry dates, deadlines, meetings,
+appointments, travel and family events. Schedule tables are filtered to important events and high-priority tasks;
+routine activities and commutes are skipped. Past and ambiguous dates are skipped. Events with a stated time use the primary calendar's
 time zone; when no time is present, the event is all-day. Reprocessing uses deterministic event IDs to avoid
 duplicates. Do not commit `.env` or share the client secret or encryption key.
 

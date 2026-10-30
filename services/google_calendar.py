@@ -24,7 +24,10 @@ from services.insights import parse_date
 log = logging.getLogger(__name__)
 google_calendar_bp = Blueprint("google_calendar", __name__)
 
-CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+CALENDAR_SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.calendars.readonly",
+]
 _EVENT_TYPES = (
     ("meeting", re.compile(
         r"\b(meeting|appointment|conference|interview|seminar|workshop|conference call)\b", re.I
@@ -46,6 +49,7 @@ _HIGH_PRIORITY_FIELD_RE = re.compile(
     r"(?:^|[|,;\t])\s*(?:priority\s*[:=]\s*)?high\s*(?:[|,;\t]|$)", re.I
 )
 _HIGH_PRIORITY_PHRASE_RE = re.compile(r"\bhigh[- ]priority\b", re.I)
+_ROUTINE_TRAVEL_RE = re.compile(r"\b(commut\w*|travel(?:ling|ing)?\s+(?:home|to office))\b", re.I)
 _WEEKDAY_RE = re.compile(
     r"^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$", re.I
 )
@@ -196,7 +200,18 @@ def build_calendar_events(
 
         context = " ".join(str(item.get("event_context") or item.get("context") or "").split())
         high_priority_title = _high_priority_title(context)
-        event_type = _event_type(context, str(item.get("label") or ""), high_priority_title)
+        event_context = str(item.get("event_title") or context) if is_schedule else context
+        event_type = _event_type(event_context, str(item.get("label") or ""), high_priority_title)
+        if is_schedule and not high_priority_title:
+            is_exam_or_hearing = bool(re.search(r"\b(exam|hearing)\b", event_context, re.I))
+            important_types = {
+                "meeting", "travel", "family get-together",
+                "validity / expiry", "deadline",
+            }
+            if event_type not in important_types and not is_exam_or_hearing:
+                continue
+            if event_type == "travel" and _ROUTINE_TRAVEL_RE.search(event_context):
+                continue
         identity = f"{document_id}|{event_date.isoformat()}|{event_type}|{context.lower()}"
         if identity in seen:
             continue

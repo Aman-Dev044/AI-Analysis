@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from datetime import date
+from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -413,12 +414,31 @@ class GoogleCalendarTests(unittest.TestCase):
             "doc-1", "Monthly schedule", [], today=date(2026, 10, 30), schedule_table=table,
         )
 
-        self.assertEqual(len(events), 2)
+        self.assertEqual(len(events), 1)
         meeting = next(event for event in events if "Weekly kickoff" in event["summary"])
         self.assertEqual(meeting["summary"], "Meeting - Weekly kickoff / team planning meeting")
         self.assertEqual(meeting["start_local"], "2026-10-30T10:30")
         self.assertEqual(meeting["end_local"], "2026-10-30T11:15")
-        self.assertTrue(any("Wake up and set priorities" in event["summary"] for event in events))
+        self.assertEqual(len(events), 1)
+
+    def test_calendar_schedule_skips_routine_rows_but_keeps_high_priority(self):
+        source = "\n".join([
+            "Date | Time | Scheduled Activity | Category | Priority",
+            "2026-10-30 | 06:30–07:00 | Wake up and set priorities | Personal | Suggested plan",
+            "2026-10-30 | 08:30–09:15 | Commute to office | Travel | Medium",
+            "2026-10-30 | 11:30–13:00 | Priority task execution | Office | High",
+            "2026-10-30 | 19:00–20:30 | Family dinner / get-together | Family | Medium",
+        ])
+        table = tabular.parse(source)
+        events = google_calendar.build_calendar_events(
+            "doc-1", "Monthly schedule", [], today=date(2026, 10, 30), schedule_table=table,
+        )
+
+        self.assertEqual(len(events), 2)
+        self.assertTrue(any(event["summary"].startswith("High priority -") for event in events))
+        self.assertTrue(any("family get-together" in event["summary"].lower() for event in events))
+        self.assertFalse(any("Wake up" in event["summary"] for event in events))
+        self.assertFalse(any("Commute" in event["summary"] for event in events))
 
     def test_oauth_flow_restores_pkce_code_verifier(self):
         from unittest.mock import patch
@@ -428,12 +448,18 @@ class GoogleCalendarTests(unittest.TestCase):
                 patch.object(google_calendar.Config, "GOOGLE_REDIRECT_URI",
                              "http://localhost:5000/google-calendar/callback"):
             initial_flow = google_calendar._flow()
-            _, state = initial_flow.authorization_url()
+            authorization_url, state = initial_flow.authorization_url()
             callback_flow = google_calendar._flow(
                 state=state, code_verifier=initial_flow.code_verifier
             )
 
         self.assertTrue(initial_flow.code_verifier)
+        requested_scopes = parse_qs(urlparse(authorization_url).query)["scope"][0].split()
+        self.assertIn("https://www.googleapis.com/auth/calendar.events", requested_scopes)
+        self.assertIn(
+            "https://www.googleapis.com/auth/calendar.calendars.readonly",
+            requested_scopes,
+        )
         self.assertEqual(callback_flow.code_verifier, initial_flow.code_verifier)
 
     def test_oauth_token_encryption_round_trip(self):
