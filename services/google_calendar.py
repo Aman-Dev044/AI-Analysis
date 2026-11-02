@@ -243,8 +243,8 @@ def build_calendar_events(
             end = datetime.combine(event_date, event_end_time)
             if end <= start:
                 end += timedelta(days=1)
-            event["start_local"] = start.isoformat(timespec="minutes")
-            event["end_local"] = end.isoformat(timespec="minutes")
+            event["start_local"] = start.isoformat(timespec="seconds")
+            event["end_local"] = end.isoformat(timespec="seconds")
         else:
             event["start"] = {"date": event_date.isoformat()}
             event["end"] = {"date": (event_date + timedelta(days=1)).isoformat()}
@@ -375,8 +375,20 @@ def sync_document_events(
             elif response.ok:
                 status, message = "created", "Added to Google Calendar."
             else:
-                status, message = "failed", f"Google Calendar returned HTTP {response.status_code}."
-                log.warning("Google Calendar event insert failed (HTTP %s)", response.status_code)
+                try:
+                    error_payload = response.json()
+                except ValueError:
+                    error_payload = {}
+                error = error_payload.get("error") if isinstance(error_payload, dict) else None
+                detail = error.get("message") if isinstance(error, dict) else None
+                detail = detail[:160] if isinstance(detail, str) else ""
+                status = "failed"
+                message = f"Google Calendar returned HTTP {response.status_code}"
+                message += f": {detail}" if detail else "."
+                log.warning(
+                    "Google Calendar event insert failed (HTTP %s): %s",
+                    response.status_code, detail or "No error message returned",
+                )
         except requests.RequestException as exc:
             status, message = "failed", f"Google Calendar request failed ({type(exc).__name__})."
             log.error("Google Calendar event insert request failed (%s)", type(exc).__name__)

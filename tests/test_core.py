@@ -326,7 +326,15 @@ class GoogleCalendarTests(unittest.TestCase):
         )
 
         self.assertEqual(len(events), 6)
-        self.assertEqual(events[0]["start_local"], "2027-01-05T21:30")
+        self.assertRegex(events[0]["id"], r"^[0-9a-v]{5,1024}$")
+        repeated_events = google_calendar.build_calendar_events(
+            "doc-1",
+            "Trip notes",
+            [{"iso": "2027-01-05", "context": "Team meeting on 5 January 2027 at 9:30 PM."}],
+            today=date(2027, 1, 1),
+        )
+        self.assertEqual(events[0]["id"], repeated_events[0]["id"])
+        self.assertEqual(events[0]["start_local"], "2027-01-05T21:30:00")
         self.assertNotIn("start", events[0])
         self.assertEqual(events[1]["start"], {"date": "2027-01-06"})
         self.assertEqual(events[1]["end"], {"date": "2027-01-07"})
@@ -366,8 +374,37 @@ class GoogleCalendarTests(unittest.TestCase):
         )
 
         self.assertEqual(len(events), 2)
-        self.assertEqual(events[0]["start_local"], "2027-03-15T09:00")
-        self.assertEqual(events[1]["start_local"], "2027-03-15T14:30")
+        self.assertEqual(events[0]["start_local"], "2027-03-15T09:00:00")
+        self.assertEqual(events[1]["start_local"], "2027-03-15T14:30:00")
+
+    def test_calendar_sync_sends_rfc3339_timed_event_values(self):
+        with mock.patch.object(google_calendar, "_calendar_access_token", return_value="token"), \
+                mock.patch.object(google_calendar.requests, "get") as get, \
+                mock.patch.object(google_calendar.requests, "post") as post:
+            get.return_value.json.return_value = {"timeZone": "Asia/Kolkata"}
+            post.return_value.status_code = 200
+            post.return_value.ok = True
+            google_calendar.sync_document_events(
+                {"google_calendar": {"token_encrypted": "encrypted"}},
+                "doc-timed",
+                "Meeting notes",
+                [{
+                    "iso": "2027-03-15",
+                    "label": "review",
+                    "context": "Meeting on 15 March 2027 at 9:00 AM.",
+                }],
+                today=date(2027, 1, 1),
+            )
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["start"], {
+            "dateTime": "2027-03-15T09:00:00",
+            "timeZone": "Asia/Kolkata",
+        })
+        self.assertEqual(payload["end"], {
+            "dateTime": "2027-03-15T10:00:00",
+            "timeZone": "Asia/Kolkata",
+        })
 
     def test_calendar_sync_reports_each_event_status_through_callback(self):
         events = []
@@ -393,6 +430,29 @@ class GoogleCalendarTests(unittest.TestCase):
         self.assertEqual(events[0]["status"], "created")
         self.assertEqual(events[0]["id"], result["events"][0]["id"])
 
+    def test_calendar_sync_surfaces_google_event_insert_error(self):
+        with mock.patch.object(google_calendar, "_calendar_access_token", return_value="token"), \
+                mock.patch.object(google_calendar.requests, "post") as post:
+            post.return_value.status_code = 400
+            post.return_value.ok = False
+            post.return_value.json.return_value = {
+                "error": {"message": "Invalid value for start.dateTime"}
+            }
+            result = google_calendar.sync_document_events(
+                {"google_calendar": {"token_encrypted": "encrypted"}},
+                "doc-5",
+                "Membership",
+                [{
+                    "iso": "2027-03-15",
+                    "label": "expiry",
+                    "context": "Membership expires on 15 March 2027",
+                }],
+                today=date(2027, 1, 1),
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("Invalid value for start.dateTime", result["events"][0]["message"])
+
     def test_calendar_event_context_preserves_full_schedule_row(self):
         source = (
             "2027-01-10 | Sunday | 09:00 | 09:30 | Review weekly goals and outstanding tasks"
@@ -417,8 +477,8 @@ class GoogleCalendarTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         meeting = next(event for event in events if "Weekly kickoff" in event["summary"])
         self.assertEqual(meeting["summary"], "Meeting - Weekly kickoff / team planning meeting")
-        self.assertEqual(meeting["start_local"], "2026-10-30T10:30")
-        self.assertEqual(meeting["end_local"], "2026-10-30T11:15")
+        self.assertEqual(meeting["start_local"], "2026-10-30T10:30:00")
+        self.assertEqual(meeting["end_local"], "2026-10-30T11:15:00")
         self.assertEqual(len(events), 1)
 
     def test_calendar_schedule_skips_routine_rows_but_keeps_high_priority(self):
