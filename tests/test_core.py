@@ -255,7 +255,8 @@ class JobTests(unittest.TestCase):
 
     def test_document_updates_persist_only_allowed_fields(self):
         from bson import ObjectId
-        from db import DOCUMENT_FIELDS, minimize_document_records
+        from datetime import datetime, timezone
+        from db import DOCUMENT_FIELDS, minimize_document_records, mongo_date
         from services import jobs
 
         collection = mock.Mock()
@@ -274,15 +275,21 @@ class JobTests(unittest.TestCase):
             self.assertTrue(set(update["$set"]).issubset(DOCUMENT_FIELDS | {"updated_at"}))
             self.assertNotIn("status", update["$set"])
             self.assertNotIn("title", update["$set"])
-            self.assertEqual(update["$set"]["expiry"], {"date": "2026-10-20", "text": "20/10/2026"})
+            self.assertNotIn("expiry", update["$set"])
+            self.assertEqual(update["$set"]["expiry_date"], datetime(2026, 10, 20, tzinfo=timezone.utc))
+            self.assertEqual(update["$set"]["expiry_text"], "20/10/2026")
         finally:
             jobs.clear_document_state(doc_id)
 
+        self.assertEqual(mongo_date("2026-10-20"), datetime(2026, 10, 20, tzinfo=timezone.utc))
+        self.assertIsNone(mongo_date("not-a-date"))
         migration_collection = mock.Mock()
         minimize_document_records(mock.Mock(documents=migration_collection))
         pipeline = migration_collection.update_many.call_args.args[1]
         self.assertEqual(set(pipeline[0]["$replaceWith"]), DOCUMENT_FIELDS | {"_id"})
-        self.assertEqual(set(pipeline[0]["$replaceWith"]["expiry"]["$cond"][1]), {"date", "text"})
+        self.assertIn("expiry_date", pipeline[0]["$replaceWith"])
+        self.assertIn("expiry_text", pipeline[0]["$replaceWith"])
+        self.assertNotIn("expiry", pipeline[0]["$replaceWith"])
 
 
 class RuleBasedTests(unittest.TestCase):

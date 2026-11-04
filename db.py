@@ -8,12 +8,13 @@ Collections used (kept minimal because the shared Atlas cluster has a collection
   files          – original file bytes, split into <=4 MB chunks
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 
 from bson import Binary, ObjectId
 from bson.errors import InvalidId
 from pymongo import ASCENDING, DESCENDING, MongoClient
+from pymongo.results import UpdateResult
 from werkzeug.security import generate_password_hash
 
 from config import Config
@@ -22,7 +23,7 @@ FILE_CHUNK_BYTES = 4 * 1024 * 1024
 ACTIVITY_KEEP = 100
 DOCUMENT_FIELDS = {
     "user_id", "file_id", "filename", "size", "uploaded_at", "updated_at",
-    "ocr_engine", "text", "expiry", "calendar_events",
+    "ocr_engine", "text", "expiry_date", "expiry_text", "calendar_events",
 }
 
 _client: Optional[MongoClient] = None
@@ -72,9 +73,9 @@ def init_db() -> None:
     seed_admin()
 
 
-def minimize_document_records(db=None) -> None:
+def minimize_document_records(db=None) -> UpdateResult:
     """Keep document records limited to the approved persistence fields."""
-    db = db or get_db()
+    db = db if db is not None else get_db()
     allowed = sorted(DOCUMENT_FIELDS | {"_id"})
     has_extra_top_level_fields = {"$anyElementTrue": [{
         "$map": {
@@ -83,35 +84,33 @@ def minimize_document_records(db=None) -> None:
             "in": {"$not": [{"$in": ["$$field.k", allowed]}]},
         }
     }]}
-    has_extra_expiry_fields = {
-        "$gt": [
-            {"$cond": [
-                {"$eq": [{"$type": "$expiry"}, "object"]},
-                {"$size": {"$objectToArray": "$expiry"}},
-                0,
-            ]},
-            2,
-        ]
-    }
+    expiry_date = {"$convert": {
+        "input": {"$ifNull": ["$expiry_date", "$expiry.date"]},
+        "to": "date", "onError": None, "onNull": None,
+    }}
+    expiry_text = {"$ifNull": ["$expiry_text", "$expiry.text"]}
     replace = {"$replaceWith": {
         "_id": "$_id",
         **{
             field: {"$ifNull": [f"${field}", "$$REMOVE"]}
-            for field in DOCUMENT_FIELDS - {"expiry"}
+            for field in DOCUMENT_FIELDS - {"expiry_date", "expiry_text"}
         },
-        "expiry": {
-            "$cond": [
-                {"$and": [
-                    {"$ne": [{"$type": "$expiry.date"}, "missing"]},
-                    {"$ne": [{"$type": "$expiry.text"}, "missing"]},
-                ]},
-                {"date": "$expiry.date", "text": "$expiry.text"},
-                "$$REMOVE",
-            ]
-        },
+        "expiry_date": {"$cond": [{"$ne": [expiry_date, None]}, expiry_date, "$$REMOVE"]},
+        "expiry_text": {"$cond": [{"$ne": [expiry_text, None]}, expiry_text, "$$REMOVE"]},
     }}
     return db.documents.update_many(
-        {"$expr": {"$or": [has_extra_top_level_fields, has_extra_expiry_fields]}},
+        {"$expr": {"$or": [
+            has_extra_top_level_fields,
+            {"$ne": [{"$type": "$expiry"}, "missing"]},
+            {"$and": [
+                {"$ne": [{"$type": "$expiry_date"}, "missing"]},
+                {"$ne": [{"$type": "$expiry_date"}, "date"]},
+            ]},
+            {"$and": [
+                {"$ne": [{"$type": "$expiry_text"}, "missing"]},
+                {"$ne": [{"$type": "$expiry_text"}, "string"]},
+            ]},
+        ]}},
         [replace],
     )
 
@@ -155,6 +154,20 @@ def read_file(file_id: ObjectId) -> bytes:
 
 def delete_file(file_id: ObjectId) -> None:
     get_db().files.delete_many({"file_id": file_id})
+
+
+def mongo_date(value) -> Optional[datetime]:
+    """Convert a date/datetime or ISO date string to UTC midnight for BSON Date storage."""
+    if isinstance(value, datetime):
+        return datetime.combine(value.date(), time.min, tzinfo=timezone.utc)
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            return datetime.combine(date.fromisoformat(value[:10]), time.min, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
 
 
 # ------------------------------------------------------------------ activity

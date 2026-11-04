@@ -15,7 +15,7 @@ from typing import Optional
 from bson import ObjectId
 
 from config import Config
-from db import DOCUMENT_FIELDS, get_db, read_file, utcnow
+from db import DOCUMENT_FIELDS, get_db, mongo_date, read_file, utcnow
 from services import (extractor, fields as fields_mod, google_calendar, insights as insights_mod, plan as plan_mod,
                       summarizer, tabular)
 from services.ollama_client import OllamaError
@@ -120,13 +120,21 @@ def _set_doc(doc_id: ObjectId, **fields):
     stored = {key: value for key, value in fields.items() if key in DOCUMENT_FIELDS}
     stored["updated_at"] = utcnow()
     unset = {}
-    if "expiry" in stored:
-        expiry = stored["expiry"]
+    if "expiry" in fields:
+        expiry = fields["expiry"]
         if expiry:
-            stored["expiry"] = {"date": expiry["date"], "text": expiry["text"]}
+            expiry_date = mongo_date(expiry.get("date"))
+            if expiry_date is None:
+                stored.pop("expiry_date", None)
+                stored.pop("expiry_text", None)
+                unset.update({"expiry_date": "", "expiry_text": ""})
+            else:
+                stored["expiry_date"] = expiry_date
+                stored["expiry_text"] = expiry.get("text", "")
         else:
-            stored.pop("expiry")
-            unset["expiry"] = ""
+            stored.pop("expiry_date", None)
+            stored.pop("expiry_text", None)
+            unset.update({"expiry_date": "", "expiry_text": ""})
     update = {"$set": stored}
     if unset:
         update["$unset"] = unset

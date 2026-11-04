@@ -3,7 +3,7 @@
 import logging
 import mimetypes
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 
@@ -106,12 +106,23 @@ def doc_brief(doc: dict, info: dict = None) -> dict:
     if info is None:
         info = insights_mod.analyze(text, soon_days=Config.EXPIRING_SOON_DAYS) \
             if text and state.get("status") in {"ready", "failed"} else {}
-    expiry = doc.get("expiry") or info.get("expiry")
+    expiry_date = doc.get("expiry_date")
+    expiry_text = doc.get("expiry_text")
+    if not expiry_date:
+        computed_expiry = info.get("expiry") or {}
+        expiry_date = computed_expiry.get("date")
+        expiry_text = expiry_text or computed_expiry.get("text")
+    expiry = {"date": expiry_date, "text": expiry_text} if expiry_date and expiry_text else None
     if expiry and expiry.get("date"):
-        days = (date.fromisoformat(expiry["date"]) - date.today()).days
+        expiry_date = expiry["date"]
+        if isinstance(expiry_date, datetime):
+            expiry_date = expiry_date.date()
+        elif not isinstance(expiry_date, date):
+            expiry_date = date.fromisoformat(str(expiry_date)[:10])
+        days = (expiry_date - date.today()).days
         ambiguous = bool(info.get("expiry", {}).get("ambiguous"))
         expiry = {
-            "date": expiry["date"], "text": expiry["text"], "days_remaining": days,
+            "date": expiry_date.isoformat(), "text": expiry["text"], "days_remaining": days,
             "status": "verify" if ambiguous else "expired" if days < 0 else
                       "expiring_soon" if days <= Config.EXPIRING_SOON_DAYS else "valid",
             "ambiguous": ambiguous,
