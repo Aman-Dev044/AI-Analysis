@@ -253,6 +253,37 @@ class JobTests(unittest.TestCase):
             self.assertEqual(orphan["status"], "failed")
             save.assert_called_once()
 
+    def test_document_updates_persist_only_allowed_fields(self):
+        from bson import ObjectId
+        from db import DOCUMENT_FIELDS, minimize_document_records
+        from services import jobs
+
+        collection = mock.Mock()
+        doc_id = ObjectId()
+        try:
+            with mock.patch.object(jobs, "get_db", return_value=mock.Mock(documents=collection)):
+                jobs._set_doc(
+                    doc_id,
+                    status="ready",
+                    title="must not persist",
+                    text="Extracted source text",
+                    expiry={"date": "2026-10-20", "text": "20/10/2026", "status": "expired"},
+                    calendar_events=[],
+                )
+            update = collection.update_one.call_args.args[1]
+            self.assertTrue(set(update["$set"]).issubset(DOCUMENT_FIELDS | {"updated_at"}))
+            self.assertNotIn("status", update["$set"])
+            self.assertNotIn("title", update["$set"])
+            self.assertEqual(update["$set"]["expiry"], {"date": "2026-10-20", "text": "20/10/2026"})
+        finally:
+            jobs.clear_document_state(doc_id)
+
+        migration_collection = mock.Mock()
+        minimize_document_records(mock.Mock(documents=migration_collection))
+        pipeline = migration_collection.update_many.call_args.args[1]
+        self.assertEqual(set(pipeline[0]["$replaceWith"]), DOCUMENT_FIELDS | {"_id"})
+        self.assertEqual(set(pipeline[0]["$replaceWith"]["expiry"]["$cond"][1]), {"date", "text"})
+
 
 class RuleBasedTests(unittest.TestCase):
     def test_every_style_without_model(self):

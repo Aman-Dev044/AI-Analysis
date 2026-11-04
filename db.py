@@ -2,7 +2,7 @@
 
 Collections used (kept minimal because the shared Atlas cluster has a collection cap):
   users          – accounts, preferences and a capped recent-activity list
-  documents      – uploads, extraction status/progress, text and insights
+  documents      – file metadata, extracted text, expiry date and calendar events
   summaries      – every generated summary (with live progress while running)
   chat_messages  – document Q&A history
   files          – original file bytes, split into <=4 MB chunks
@@ -20,6 +20,10 @@ from config import Config
 
 FILE_CHUNK_BYTES = 4 * 1024 * 1024
 ACTIVITY_KEEP = 100
+DOCUMENT_FIELDS = {
+    "user_id", "file_id", "filename", "size", "uploaded_at", "updated_at",
+    "ocr_engine", "text", "expiry", "calendar_events",
+}
 
 _client: Optional[MongoClient] = None
 _db = None
@@ -52,16 +56,11 @@ def init_db() -> None:
     db.chat_messages.create_index([("document_id", ASCENDING), ("_id", ASCENDING)])
     db.files.create_index([("file_id", ASCENDING), ("n", ASCENDING)], unique=True)
 
-    # Work interrupted by a restart can never finish; surface it so the user can retry. Only work that has
-    # not moved for a while: another live copy of the app may still be running a recent job. Anything newer
-    # is caught later by jobs.reap_document / reap_summary once it goes stale.
+    minimize_document_records(db)
+
+    # Summary and chat jobs survive in MongoDB; document-job state is memory-only.
     cutoff = utcnow() - timedelta(minutes=2)
     stale = {"$nor": [{f: {"$gte": cutoff}} for f in ("updated_at", "created_at", "uploaded_at")]}
-    db.documents.update_many(
-        {"status": {"$nin": ["ready", "failed"]}, **stale},
-        {"$set": {"status": "failed", "stage": "failed", "stage_message": "Failed",
-                  "error": "Processing was interrupted (the server restarted). Use Reprocess to run it again."}},
-    )
     db.summaries.update_many(
         {"status": {"$in": ["queued", "running"]}, **stale},
         {"$set": {"status": "failed", "error": "Generation was interrupted (the server restarted). Generate it again."}},
@@ -71,6 +70,50 @@ def init_db() -> None:
         {"$set": {"status": "failed", "error": "Interrupted by a server restart."}},
     )
     seed_admin()
+
+
+def minimize_document_records(db=None) -> None:
+    """Keep document records limited to the approved persistence fields."""
+    db = db or get_db()
+    allowed = sorted(DOCUMENT_FIELDS | {"_id"})
+    has_extra_top_level_fields = {"$anyElementTrue": [{
+        "$map": {
+            "input": {"$objectToArray": "$$ROOT"},
+            "as": "field",
+            "in": {"$not": [{"$in": ["$$field.k", allowed]}]},
+        }
+    }]}
+    has_extra_expiry_fields = {
+        "$gt": [
+            {"$cond": [
+                {"$eq": [{"$type": "$expiry"}, "object"]},
+                {"$size": {"$objectToArray": "$expiry"}},
+                0,
+            ]},
+            2,
+        ]
+    }
+    replace = {"$replaceWith": {
+        "_id": "$_id",
+        **{
+            field: {"$ifNull": [f"${field}", "$$REMOVE"]}
+            for field in DOCUMENT_FIELDS - {"expiry"}
+        },
+        "expiry": {
+            "$cond": [
+                {"$and": [
+                    {"$ne": [{"$type": "$expiry.date"}, "missing"]},
+                    {"$ne": [{"$type": "$expiry.text"}, "missing"]},
+                ]},
+                {"date": "$expiry.date", "text": "$expiry.text"},
+                "$$REMOVE",
+            ]
+        },
+    }}
+    return db.documents.update_many(
+        {"$expr": {"$or": [has_extra_top_level_fields, has_extra_expiry_fields]}},
+        [replace],
+    )
 
 
 def seed_admin() -> bool:

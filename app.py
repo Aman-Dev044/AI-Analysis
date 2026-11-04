@@ -3,7 +3,7 @@
 import logging
 import mimetypes
 import re
-from datetime import timedelta
+from datetime import date, timedelta
 from functools import wraps
 from pathlib import Path
 
@@ -16,7 +16,7 @@ from werkzeug.utils import secure_filename
 from config import Config
 from db import delete_file, get_db, init_db, iso, log_activity, oid, put_file, read_file, recent_activity, utcnow
 from services.google_calendar import google_calendar_bp
-from services import jobs, ollama_client, summarizer
+from services import fields as fields_mod, insights as insights_mod, jobs, ollama_client, summarizer, tabular
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("documind")
@@ -97,30 +97,48 @@ def owned_doc(user, doc_id, projection=None):
     return doc
 
 
-def doc_brief(doc: dict) -> dict:
+def doc_brief(doc: dict, info: dict = None) -> dict:
     jobs.reap_document(doc)
-    info = doc.get("insights") or {}
+    state = jobs.document_state(doc)
+    filename = doc.get("filename") or "document"
+    ext = Path(filename).suffix.lower()
+    text = doc.get("text") or ""
+    if info is None:
+        info = insights_mod.analyze(text, soon_days=Config.EXPIRING_SOON_DAYS) \
+            if text and state.get("status") in {"ready", "failed"} else {}
+    expiry = doc.get("expiry") or info.get("expiry")
+    if expiry and expiry.get("date"):
+        days = (date.fromisoformat(expiry["date"]) - date.today()).days
+        ambiguous = bool(info.get("expiry", {}).get("ambiguous"))
+        expiry = {
+            "date": expiry["date"], "text": expiry["text"], "days_remaining": days,
+            "status": "verify" if ambiguous else "expired" if days < 0 else
+                      "expiring_soon" if days <= Config.EXPIRING_SOON_DAYS else "valid",
+            "ambiguous": ambiguous,
+        }
+    title = Path(filename).stem
+    status = state.get("status")
     return {
         "id": str(doc["_id"]),
-        "title": doc.get("title"),
-        "filename": doc.get("filename"),
-        "ext": doc.get("ext"),
+        "title": title,
+        "filename": filename,
+        "ext": ext,
         "size": doc.get("size", 0),
-        "status": doc.get("status"),
-        "stage": doc.get("stage"),
-        "progress": doc.get("progress", 0),
-        "stage_message": doc.get("stage_message"),
-        "error": doc.get("error"),
-        "doc_type": doc.get("doc_type"),
-        "pages": doc.get("pages"),
-        "word_count": doc.get("word_count"),
+        "status": status,
+        "stage": state.get("stage", status),
+        "progress": state.get("progress", 100 if status == "ready" else 0),
+        "stage_message": state.get("stage_message"),
+        "error": state.get("error"),
+        "doc_type": info.get("doc_type"),
+        "pages": None,
+        "word_count": (info.get("stats") or {}).get("words"),
         "reading_minutes": (info.get("stats") or {}).get("reading_minutes"),
-        "ocr_used": doc.get("ocr_used", False),
+        "ocr_used": bool(doc.get("ocr_engine")),
         "ocr_engine": doc.get("ocr_engine"),
-        "is_plan": doc.get("is_plan", False),
-        "expiry": doc.get("expiry"),
-        "summary_failed": doc.get("summary_failed", False),
-        "auto_summary_id": str(doc["auto_summary_id"]) if doc.get("auto_summary_id") else None,
+        "is_plan": bool(text and jobs.plan_for(text)),
+        "expiry": expiry,
+        "summary_failed": state.get("summary_failed", False),
+        "auto_summary_id": str(state["auto_summary_id"]) if state.get("auto_summary_id") else None,
         "uploaded_at": iso(doc.get("uploaded_at")),
         "updated_at": iso(doc.get("updated_at")),
     }
@@ -141,6 +159,21 @@ def summary_out(s: dict) -> dict:
 def chat_out(m: dict) -> dict:
     return {"id": str(m["_id"]), "role": m["role"], "content": m.get("content", ""),
             "status": m.get("status"), "error": m.get("error"), "created_at": iso(m.get("created_at"))}
+
+
+def calendar_status(events: list[dict]) -> str:
+    statuses = {event.get("status") for event in events}
+    if not statuses:
+        return "no_events"
+    if "pending" in statuses:
+        return "pending"
+    if "failed" in statuses and "created" in statuses:
+        return "partial"
+    if "failed" in statuses:
+        return "failed"
+    if "not_connected" in statuses:
+        return "not_connected"
+    return "created"
 
 
 # ------------------------------------------------------------------ pages
@@ -271,48 +304,59 @@ def ollama_health(user):
 def dashboard(user):
     db = get_db()
     uid = user["_id"]
-    docs = list(db.documents.find({"user_id": uid}, {"text": 0}).sort("uploaded_at", -1))
+    docs = db.documents.find({"user_id": uid}).sort("uploaded_at", -1)
     week_ago = utcnow() - timedelta(days=7)
+    document_count = db.documents.count_documents({"user_id": uid})
     summaries_total = db.summaries.count_documents({"user_id": uid, "status": "done"})
 
-    alerts, upcoming = [], []
+    alerts, upcoming, recent, by_type = [], [], [], {}
+    ready_count = processing_count = failed_count = words_count = this_week = 0
+    plan = None
     for d in docs:
-        exp = d.get("expiry")
+        info = insights_mod.analyze(d.get("text") or "", soon_days=Config.EXPIRING_SOON_DAYS) \
+            if d.get("text") else {}
+        brief = doc_brief(d, info)
+        if len(recent) < 6:
+            recent.append(brief)
+        state = jobs.document_state(d)
+        if state.get("status") == "ready":
+            ready_count += 1
+        elif state.get("status") == "failed":
+            failed_count += 1
+        else:
+            processing_count += 1
+        words_count += (info.get("stats") or {}).get("words", 0)
+        if d.get("uploaded_at") and d["uploaded_at"] >= week_ago:
+            this_week += 1
+        if info.get("doc_type"):
+            by_type[info["doc_type"]] = by_type.get(info["doc_type"], 0) + 1
+        if not plan and d.get("text"):
+            details = jobs.plan_for(d["text"])
+            if details:
+                plan = {"document_id": str(d["_id"]), "title": brief["title"], **details}
+        exp = brief.get("expiry")
         if exp and exp.get("status") in {"expired", "expiring_soon", "verify"}:
-            alerts.append({"document": doc_brief(d), **exp})
-        for item in (d.get("insights") or {}).get("upcoming", []):
-            upcoming.append({**item, "document_id": str(d["_id"]), "document_title": d.get("title")})
+            alerts.append({"document": brief, **exp})
+        for item in info.get("upcoming", []):
+            upcoming.append({**item, "document_id": str(d["_id"]), "document_title": brief["title"]})
     alerts.sort(key=lambda a: a.get("days_remaining", 0))
     upcoming.sort(key=lambda u: u["iso"])
-
-    plan = None
-    plan_doc = next((d for d in docs if d.get("is_plan")), None)
-    if plan_doc:
-        full = db.documents.find_one({"_id": plan_doc["_id"]}, {"text": 1, "title": 1})
-        details = jobs.plan_for(full.get("text") or "")
-        if details:
-            plan = {"document_id": str(plan_doc["_id"]), "title": plan_doc.get("title"), **details}
-
-    by_type = {}
-    for d in docs:
-        if d.get("doc_type"):
-            by_type[d["doc_type"]] = by_type.get(d["doc_type"], 0) + 1
 
     activity = recent_activity(user, 8)
 
     return jsonify({
         "user": public_user(user),
         "stats": {
-            "documents": len(docs),
-            "ready": sum(1 for d in docs if d.get("status") == "ready"),
-            "processing": sum(1 for d in docs if d.get("status") not in {"ready", "failed"}),
-            "failed": sum(1 for d in docs if d.get("status") == "failed"),
+            "documents": document_count,
+            "ready": ready_count,
+            "processing": processing_count,
+            "failed": failed_count,
             "summaries": summaries_total,
-            "words": sum(d.get("word_count") or 0 for d in docs),
-            "this_week": sum(1 for d in docs if d.get("uploaded_at") and d["uploaded_at"] >= week_ago),
+            "words": words_count,
+            "this_week": this_week,
         },
         "by_type": sorted(({"type": k, "count": v} for k, v in by_type.items()), key=lambda x: -x["count"]),
-        "recent": [doc_brief(d) for d in docs[:6]],
+        "recent": recent,
         "alerts": alerts[:10],
         "upcoming": upcoming[:12],
         "plan": plan,
@@ -338,29 +382,29 @@ def upload(user):
     auto_summary = form.get("auto_summary", "true") != "false"
     created = []
     for f in files:
-        filename = secure_filename(f.filename or "") or "document"
         ext = Path(f.filename or "").suffix.lower()
         if ext not in Config.ALLOWED_EXTENSIONS:
             return api_error(f"'{f.filename}' is not a supported file type.")
+        original_filename = secure_filename(f.filename or "") or "document"
+        requested_title = secure_filename((form.get("title") or "")[:160])
+        filename = f"{requested_title}{ext}" if len(files) == 1 and requested_title else original_filename
         data = f.read()
         if not data:
             return api_error(f"'{f.filename}' is empty.")
-        mime = f.mimetype or mimetypes.guess_type(filename)[0] or "application/octet-stream"
         file_id = put_file(data)
         now = utcnow()
-        title = (form.get("title") if len(files) == 1 else "") or Path(f.filename or filename).stem
+        title = Path(filename).stem
         doc_id = get_db().documents.insert_one({
-            "user_id": user["_id"], "title": title.strip()[:160], "filename": f.filename or filename,
-            "ext": ext, "mime": mime, "size": len(data), "file_id": file_id,
-            "status": "queued", "stage": "queued", "progress": 3, "stage_message": "Waiting in queue",
-            "error": None, "auto_summary": auto_summary,
-            "auto_mode": form.get("mode") if form.get("mode") in summarizer.MODES else None,
-            "auto_length": form.get("length") if form.get("length") in summarizer.LENGTHS else None,
-            "auto_language": form.get("language") if form.get("language") in summarizer.LANGUAGES else None,
+            "user_id": user["_id"], "filename": filename, "size": len(data), "file_id": file_id,
             "uploaded_at": now, "updated_at": now,
         }).inserted_id
         log_activity(user["_id"], "upload", f"Uploaded {title}", doc_id)
-        jobs.enqueue_document(doc_id)
+        jobs.enqueue_document(doc_id, {
+            "auto_summary": auto_summary,
+            "mode": form.get("mode") if form.get("mode") in summarizer.MODES else None,
+            "length": form.get("length") if form.get("length") in summarizer.LENGTHS else None,
+            "language": form.get("language") if form.get("language") in summarizer.LANGUAGES else None,
+        })
         created.append({"id": str(doc_id), "title": title, "filename": f.filename})
     return jsonify({"documents": created}), 201
 
@@ -370,15 +414,20 @@ def upload(user):
 def list_docs(user):
     query = {"user_id": user["_id"]}
     q = (request.args.get("q") or "").strip()
-    if q:
-        query["$or"] = [{"title": {"$regex": re.escape(q), "$options": "i"}},
-                        {"filename": {"$regex": re.escape(q), "$options": "i"}}]
-    if request.args.get("type"):
-        query["doc_type"] = request.args["type"]
-    if request.args.get("status"):
-        query["status"] = request.args["status"]
-    docs = get_db().documents.find(query, {"text": 0}).sort("uploaded_at", -1).limit(500)
-    return jsonify([doc_brief(d) for d in docs])
+    docs = get_db().documents.find(query).sort("uploaded_at", -1).limit(500)
+    type_filter = request.args.get("type")
+    status_filter = request.args.get("status")
+    result = []
+    for doc in docs:
+        brief = doc_brief(doc)
+        if q and q.lower() not in brief["filename"].lower() and q.lower() not in brief["title"].lower():
+            continue
+        if type_filter and brief["doc_type"] != type_filter:
+            continue
+        if status_filter and brief["status"] != status_filter:
+            continue
+        result.append(brief)
+    return jsonify(result)
 
 
 @app.get("/api/documents/<doc_id>")
@@ -387,15 +436,18 @@ def get_doc(user, doc_id):
     doc = owned_doc(user, doc_id)
     db = get_db()
     summaries = [summary_out(s) for s in db.summaries.find({"document_id": doc["_id"]}).sort("created_at", -1)]
-    out = doc_brief(doc)
+    info = insights_mod.analyze(doc.get("text") or "", soon_days=Config.EXPIRING_SOON_DAYS)
+    table = tabular.parse(doc.get("text") or "")
+    info["fields"] = [] if table else fields_mod.extract_fields(doc.get("text") or "")
+    out = doc_brief(doc, info)
     out.update({
-        "insights": doc.get("insights"),
-        "calendar_event_status": doc.get("calendar_event_status"),
+        "insights": info,
+        "calendar_event_status": calendar_status(doc.get("calendar_events", [])),
         "calendar_events": doc.get("calendar_events", []),
         "summaries": summaries,
-        "plan": jobs.plan_for(doc.get("text") or "") if doc.get("is_plan") else None,
+        "plan": jobs.plan_for(doc.get("text") or ""),
         "has_text": bool(doc.get("text")),
-        "mime": doc.get("mime"),
+        "mime": mimetypes.guess_type(doc.get("filename") or "")[0] or "application/octet-stream",
     })
     return jsonify(out)
 
@@ -403,12 +455,13 @@ def get_doc(user, doc_id):
 @app.get("/api/documents/<doc_id>/status")
 @login_required
 def doc_status(user, doc_id):
-    doc = owned_doc(user, doc_id, {"text": 0})
+    doc = owned_doc(user, doc_id)
     out = doc_brief(doc)
-    out["calendar_event_status"] = doc.get("calendar_event_status")
+    out["calendar_event_status"] = calendar_status(doc.get("calendar_events", []))
     out["calendar_events"] = doc.get("calendar_events", [])
-    if doc.get("auto_summary_id"):
-        s = get_db().summaries.find_one({"_id": doc["auto_summary_id"]})
+    auto_id = jobs.document_state(doc).get("auto_summary_id")
+    if auto_id:
+        s = get_db().summaries.find_one({"_id": auto_id})
         out["summary"] = summary_out(s) if s else None
     return jsonify(out)
 
@@ -424,7 +477,7 @@ def doc_text(user, doc_id):
 @login_required
 def doc_file(user, doc_id):
     doc = owned_doc(user, doc_id)
-    mime = doc.get("mime") or "application/octet-stream"
+    mime = mimetypes.guess_type(doc.get("filename") or "")[0] or "application/octet-stream"
     inline = request.args.get("download") != "1" and mime in INLINE_TYPES
     name = secure_filename(doc.get("filename") or "file") or "file"
     return Response(
@@ -437,25 +490,25 @@ def doc_file(user, doc_id):
 @app.patch("/api/documents/<doc_id>")
 @login_required
 def rename_doc(user, doc_id):
-    doc = owned_doc(user, doc_id, {"_id": 1})
+    doc = owned_doc(user, doc_id, {"_id": 1, "filename": 1})
     title = ((request.get_json(silent=True) or {}).get("title") or "").strip()
     if not title:
         return api_error("Title cannot be empty.")
-    get_db().documents.update_one({"_id": doc["_id"]}, {"$set": {"title": title[:160]}})
+    suffix = Path(doc.get("filename") or "").suffix
+    filename = (secure_filename(title) or "document")[:160] + suffix
+    get_db().documents.update_one({"_id": doc["_id"]}, {"$set": {"filename": filename, "updated_at": utcnow()}})
     return jsonify({"ok": True, "title": title[:160]})
 
 
 @app.post("/api/documents/<doc_id>/reprocess")
 @login_required
 def reprocess(user, doc_id):
-    doc = owned_doc(user, doc_id, {"text": 0})
-    if doc.get("status") not in {"ready", "failed"}:
+    doc = owned_doc(user, doc_id)
+    if jobs.document_state(doc).get("status") not in {"ready", "failed"}:
         return api_error("This document is still being processed.", 409)
     get_db().documents.update_one({"_id": doc["_id"]}, {"$set": {
-        "status": "queued", "stage": "queued", "progress": 3, "stage_message": "Waiting in queue",
-        "error": None, "summary_failed": False, "calendar_event_status": "pending",
         "calendar_events": [], "updated_at": utcnow()}})
-    log_activity(user["_id"], "reprocess", f"Reprocessed {doc.get('title')}", doc["_id"])
+    log_activity(user["_id"], "reprocess", f"Reprocessed {Path(doc['filename']).stem}", doc["_id"])
     jobs.enqueue_document(doc["_id"])
     return jsonify({"ok": True})
 
@@ -469,7 +522,8 @@ def delete_doc(user, doc_id):
     db.summaries.delete_many({"document_id": doc["_id"]})
     db.chat_messages.delete_many({"document_id": doc["_id"]})
     db.documents.delete_one({"_id": doc["_id"]})
-    log_activity(user["_id"], "delete", f"Deleted {doc.get('title')}")
+    jobs.clear_document_state(doc["_id"])
+    log_activity(user["_id"], "delete", f"Deleted {Path(doc['filename']).stem}")
     return jsonify({"ok": True})
 
 
@@ -477,8 +531,8 @@ def delete_doc(user, doc_id):
 @app.post("/api/documents/<doc_id>/summaries")
 @login_required
 def new_summary(user, doc_id):
-    doc = owned_doc(user, doc_id, {"text": 0})
-    if doc.get("status") not in {"ready"}:
+    doc = owned_doc(user, doc_id)
+    if jobs.document_state(doc).get("status") != "ready":
         return api_error("Wait until the document finishes processing.", 409)
     data = request.get_json(silent=True) or {}
     if data.get("mode") == "custom" and not (data.get("instructions") or "").strip():
@@ -489,7 +543,8 @@ def new_summary(user, doc_id):
         model=(data.get("model") or "").strip() or None,
     )
     log_activity(user["_id"], "summary",
-                 f"Generated {summarizer.MODES.get(data.get('mode'), {}).get('label', 'summary')} for {doc.get('title')}",
+                 f"Generated {summarizer.MODES.get(data.get('mode'), {}).get('label', 'summary')} "
+                 f"for {Path(doc['filename']).stem}",
                  doc["_id"])
     jobs.enqueue_summary(summary_id)
     return jsonify(summary_out(get_db().summaries.find_one({"_id": summary_id}))), 201
@@ -523,8 +578,8 @@ def chat_history(user, doc_id):
 @app.post("/api/documents/<doc_id>/chat")
 @login_required
 def ask(user, doc_id):
-    doc = owned_doc(user, doc_id, {"text": 0})
-    if doc.get("status") != "ready":
+    doc = owned_doc(user, doc_id)
+    if jobs.document_state(doc).get("status") != "ready":
         return api_error("Wait until the document finishes processing.", 409)
     data = request.get_json(silent=True) or {}
     question = (data.get("question") or "").strip()

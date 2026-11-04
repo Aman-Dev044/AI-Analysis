@@ -9,12 +9,13 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from pathlib import Path
 from typing import Optional
 
 from bson import ObjectId
 
 from config import Config
-from db import get_db, read_file, utcnow
+from db import DOCUMENT_FIELDS, get_db, read_file, utcnow
 from services import (extractor, fields as fields_mod, google_calendar, insights as insights_mod, plan as plan_mod,
                       summarizer, tabular)
 from services.ollama_client import OllamaError
@@ -26,6 +27,8 @@ _executor = ThreadPoolExecutor(max_workers=Config.WORKERS, thread_name_prefix="d
 # owned here and has not moved for STALE_SECONDS was cut off by a crash or restart.
 _active: set = set()
 _active_lock = threading.Lock()
+_document_states: dict[ObjectId, dict] = {}
+_document_options: dict[ObjectId, dict] = {}
 STALE_SECONDS = 120
 INTERRUPTED = "Processing was interrupted (the server restarted). Use Reprocess to run it again."
 IN_PROGRESS = {"queued", "extracting", "analyzing", "summarizing", "running"}
@@ -55,11 +58,37 @@ def _stale(record: dict) -> bool:
 
 def reap_document(doc: dict) -> dict:
     """Mark an orphaned in-progress document failed (in place) so the user can reprocess it."""
-    if doc.get("status") in IN_PROGRESS and doc["_id"] not in _active and _stale(doc):
+    state = document_state(doc)
+    if state.get("status") in IN_PROGRESS and doc["_id"] not in _active and _stale(doc):
         fields = {"status": "failed", "stage": "failed", "stage_message": "Failed", "error": INTERRUPTED}
         _set_doc(doc["_id"], **fields)
         doc.update(fields)
     return doc
+
+
+def document_state(doc: dict) -> dict:
+    with _active_lock:
+        state = dict(_document_states.get(doc["_id"], {}))
+    if state:
+        return state
+    if doc.get("status"):
+        return {
+            "status": doc["status"], "stage": doc.get("stage", doc["status"]),
+            "progress": doc.get("progress", 0), "stage_message": doc.get("stage_message"),
+            "error": doc.get("error"),
+        }
+    if (doc.get("text") or "").strip():
+        return {"status": "ready", "stage": "ready", "progress": 100, "stage_message": "Ready"}
+    return {
+        "status": "failed", "stage": "failed", "progress": 0, "stage_message": "Failed",
+        "error": "Processing state is unavailable. Use Reprocess to run it again.",
+    }
+
+
+def _set_document_state(doc_id: ObjectId, **fields):
+    with _active_lock:
+        transient = {key: value for key, value in fields.items() if key not in DOCUMENT_FIELDS}
+        _document_states.setdefault(doc_id, {}).update(transient)
 
 
 def reap_summary(summary: dict) -> dict:
@@ -87,8 +116,21 @@ class _Throttle:
 
 
 def _set_doc(doc_id: ObjectId, **fields):
-    fields["updated_at"] = utcnow()
-    get_db().documents.update_one({"_id": doc_id}, {"$set": fields})
+    _set_document_state(doc_id, **fields)
+    stored = {key: value for key, value in fields.items() if key in DOCUMENT_FIELDS}
+    stored["updated_at"] = utcnow()
+    unset = {}
+    if "expiry" in stored:
+        expiry = stored["expiry"]
+        if expiry:
+            stored["expiry"] = {"date": expiry["date"], "text": expiry["text"]}
+        else:
+            stored.pop("expiry")
+            unset["expiry"] = ""
+    update = {"$set": stored}
+    if unset:
+        update["$unset"] = unset
+    get_db().documents.update_one({"_id": doc_id}, update)
 
 
 def _set_summary(summary_id: ObjectId, **fields):
@@ -156,11 +198,15 @@ def _run_summary(summary_id: ObjectId, on_progress=None) -> bool:
             _set_summary(summary_id, **fields)
 
     try:
+        info = insights_mod.analyze(doc["text"])
+        table = tabular.parse(doc["text"])
+        info["fields"] = [] if table else fields_mod.extract_fields(doc["text"])
         content = summarizer.summarize(
             doc["text"],
             mode=summary["mode"], length=summary.get("length", "standard"), language=summary["language"],
-            instructions=summary.get("instructions") or "", insights=doc.get("insights") or {},
-            title=doc.get("title", ""), model=summary.get("model"), progress=progress,
+            instructions=summary.get("instructions") or "", insights=info,
+            title=Path(doc.get("filename") or "Document").stem,
+            model=summary.get("model"), progress=progress,
         )
         _set_summary(summary_id, status="done", progress=100, stage_message="Completed", content=content,
                      duration_ms=int((time.monotonic() - started) * 1000), error=None)
@@ -195,6 +241,8 @@ def process_document(doc_id: ObjectId):
         return
     user = db.users.find_one({"_id": doc["user_id"]}) or {}
     prefs = user.get("prefs") or {}
+    with _active_lock:
+        options = dict(_document_options.get(doc_id, {}))
     try:
         _set_doc(doc_id, status="extracting", stage="extracting", progress=5,
                  stage_message="Opening file", error=None)
@@ -206,31 +254,29 @@ def process_document(doc_id: ObjectId):
             if throttle.ready() or pct >= 100:
                 _set_doc(doc_id, progress=5 + int(pct * 0.5), stage_message=message)
 
-        result = extractor.extract(data, doc["ext"], extract_progress)
+        ext = Path(doc["filename"]).suffix.lower()
+        result = extractor.extract(data, ext, extract_progress)
         text = (result.text or "").strip()
         if not text:
             raise extractor.ExtractionError(
                 "No readable text was found in this file. If it is a scan/photo, configure an OCR engine.")
 
         _set_doc(doc_id, status="analyzing", stage="analyzing", progress=58,
-                 stage_message="Finding dates, amounts and key facts", text=text, pages=result.pages,
-                 ocr_used=result.ocr_used, ocr_engine=result.ocr_engine)
+                 stage_message="Finding dates, amounts and key facts", text=text,
+                 ocr_engine=result.ocr_engine if result.ocr_used else None)
 
         info = insights_mod.analyze(text, soon_days=Config.EXPIRING_SOON_DAYS)
         calendar_dates = insights_mod.extract_dates(text, limit=None, deduplicate=False)
         table = tabular.parse(text)
-        if table:  # a spreadsheet: its rows are data, not "Label: value" fields or prose
+        if table:
             info["doc_type"] = tabular.doc_type(tabular.analyze(table))
             info["fields"] = []
         else:
             info["fields"] = fields_mod.extract_fields(text)
-        info["expiry"] = _labelled_expiry(info) or info.get("expiry")
-        is_plan = plan_mod.detect_plan(text) is not None
-        _set_doc(doc_id, progress=64, stage_message="Document analysed", insights=info,
-                 doc_type=info["doc_type"], word_count=info["stats"]["words"], is_plan=is_plan,
-                 expiry=info.get("expiry"))
+        expiry = _labelled_expiry(info) or info.get("expiry")
+        _set_doc(doc_id, progress=64, stage_message="Document analysed", expiry=expiry)
         calendar_candidates = google_calendar.build_calendar_events(
-            str(doc_id), doc.get("title") or doc.get("filename") or "Document",
+            str(doc_id), Path(doc.get("filename") or "Document").stem,
             calendar_dates, schedule_table=table,
         )
         pending_events = [{
@@ -242,11 +288,7 @@ def process_document(doc_id: ObjectId):
             "status": "pending",
             "message": "Waiting to sync with Google Calendar.",
         } for event in calendar_candidates]
-        _set_doc(
-            doc_id,
-            calendar_event_status="pending" if pending_events else "no_events",
-            calendar_events=pending_events,
-        )
+        _set_doc(doc_id, calendar_events=pending_events)
 
         def save_calendar_event(outcome: dict):
             db.documents.update_one(
@@ -256,7 +298,7 @@ def process_document(doc_id: ObjectId):
 
         try:
             calendar_result = google_calendar.sync_document_events(
-                user, str(doc_id), doc.get("title") or doc.get("filename") or "Document",
+                user, str(doc_id), Path(doc.get("filename") or "Document").stem,
                 calendar_dates, schedule_table=table, on_event_update=save_calendar_event,
             )
             _set_doc(
@@ -288,7 +330,7 @@ def process_document(doc_id: ObjectId):
                 calendar_events=failed_events,
             )
 
-        if not doc.get("auto_summary", True):
+        if not options.get("auto_summary", True):
             _set_doc(doc_id, status="ready", stage="ready", progress=100, stage_message="Ready")
             return
 
@@ -296,9 +338,9 @@ def process_document(doc_id: ObjectId):
                  stage_message="Generating AI summary")
         summary_id = create_summary(
             doc, user,
-            mode=doc.get("auto_mode") or prefs.get("mode") or Config.DEFAULT_MODE,
-            length=doc.get("auto_length") or "standard",
-            language=doc.get("auto_language") or prefs.get("language", "English"),
+            mode=options.get("mode") or prefs.get("mode") or Config.DEFAULT_MODE,
+            length=options.get("length") or prefs.get("length") or "standard",
+            language=options.get("language") or prefs.get("language", "English"),
         )
         _set_doc(doc_id, auto_summary_id=summary_id)
         doc_throttle = _Throttle(0.5)
@@ -314,11 +356,26 @@ def process_document(doc_id: ObjectId):
     except Exception as exc:
         log.exception("Processing document %s failed", doc_id)
         _set_doc(doc_id, status="failed", stage="failed", stage_message="Failed", error=_friendly(exc))
+    finally:
+        with _active_lock:
+            _document_options.pop(doc_id, None)
 
 
-def enqueue_document(doc_id: ObjectId):
+def enqueue_document(doc_id: ObjectId, options: Optional[dict] = None):
+    with _active_lock:
+        _document_options[doc_id] = dict(options or {})
+        _document_states[doc_id] = {
+            "status": "queued", "stage": "queued", "progress": 3,
+            "stage_message": "Waiting in queue", "error": None,
+        }
     _own(doc_id)
     _executor.submit(_owned, process_document, doc_id)
+
+
+def clear_document_state(doc_id: ObjectId):
+    with _active_lock:
+        _document_states.pop(doc_id, None)
+        _document_options.pop(doc_id, None)
 
 
 # ------------------------------------------------------------------ chat
@@ -344,7 +401,7 @@ def run_chat(message_id: ObjectId):
         answer = summarizer.answer_question(
             doc.get("text") or "", question, history,
             language=msg.get("language", "English"), model=msg.get("model"), on_token=on_token,
-            insights=doc.get("insights") or {},
+            insights=_analyze_document_text(doc.get("text") or ""),
         )
         db.chat_messages.update_one({"_id": message_id}, {"$set": {"status": "done", "content": answer}})
     except Exception as exc:
@@ -359,3 +416,9 @@ def enqueue_chat(message_id: ObjectId):
 
 def plan_for(text: str) -> Optional[dict]:
     return plan_mod.detect_plan(text, date.today())
+
+
+def _analyze_document_text(text: str) -> dict:
+    info = insights_mod.analyze(text)
+    info["fields"] = [] if tabular.parse(text) else fields_mod.extract_fields(text)
+    return info
