@@ -120,7 +120,7 @@ def doc_brief(doc: dict, info: dict = None) -> dict:
         elif not isinstance(expiry_date, date):
             expiry_date = date.fromisoformat(str(expiry_date)[:10])
         days = (expiry_date - date.today()).days
-        ambiguous = bool(info.get("expiry", {}).get("ambiguous"))
+        ambiguous = bool((info.get("expiry") or {}).get("ambiguous"))
         expiry = {
             "date": expiry_date.isoformat(), "text": expiry["text"], "days_remaining": days,
             "status": "verify" if ambiguous else "expired" if days < 0 else
