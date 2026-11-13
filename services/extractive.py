@@ -40,7 +40,8 @@ CUE_RE = re.compile(
     r"declin\w*|revenue|profit|loss)\b",
     re.IGNORECASE,
 )
-_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])")
+# Lowercase starts count too: hurried notes often read "pls be on time. also the review moved…".
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Za-z0-9\"'(\[])")
 _ABBREV = re.compile(r"\b(?:rs|no|nos|mr|mrs|ms|dr|st|sr|jr|vs|vill|distt|dist|p\.o|po|teh|govt|dept|ltd|pvt|inc|co|"
                      r"approx|fig|ref|sec|art|cl|e\.g|i\.e|etc|[a-z])\.$", re.IGNORECASE)
 # "- item", "• item", "1. item", "a) item", "(ii) item" — list markers in front of real text
@@ -414,7 +415,7 @@ def doc_title(text: str) -> str:
         seen += 1
         if seen > 5:
             break
-        if is_label_line(s) or DATE_RE.fullmatch(s) or _BULLET.match(s):
+        if is_label_line(s) or DATE_RE.fullmatch(s) or _BULLET.match(s) or re.fullmatch(r"(?i)page\s*\d+(?:\s*of\s*\d+)?", s):
             continue
         n = len(s.split())
         if 2 <= n <= 14 and len(s) <= 100 and not s.endswith((".", ",", ";", ":")) and (

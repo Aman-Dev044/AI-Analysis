@@ -14,6 +14,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+from collections import Counter
 from typing import Callable, Optional
 
 from config import Config
@@ -183,7 +184,32 @@ def _pdf(data: bytes, progress: Progress) -> ExtractionResult:
                 ocr_text, engine = ocr_image(png)
                 ocr_used = True
                 chunks.append(ocr_text)
-    return ExtractionResult("\n\n".join(chunks), pages=total, ocr_used=ocr_used, ocr_engine=engine)
+    return ExtractionResult(_strip_page_furniture(chunks), pages=total, ocr_used=ocr_used, ocr_engine=engine)
+
+
+_PAGE_NUMBER = re.compile(r"^(?:page\s*)?\d{1,4}(?:\s*(?:of|/)\s*\d{1,4})?$|^-\s*\d{1,4}\s*-$", re.I)
+
+
+def _strip_page_furniture(pages: list[str]) -> str:
+    """Drop page numbers and the running header / footer repeated on every page, so neither is read as the
+    document's title or content."""
+    def norm(line: str) -> str:
+        return re.sub(r"\d+", "#", " ".join(line.split()).lower())
+
+    split = [p.splitlines() for p in pages]
+    repeated = set()
+    if len(split) >= 2:
+        edges = Counter()
+        for lines in split:
+            body = [ln for ln in lines if ln.strip()]
+            # Short label-free lines only: two pages both ending in "Total: 500" / "Total: 700" are content.
+            edges.update({norm(ln) for ln in body[:3] + body[-3:] if len(ln.split()) <= 8 and ":" not in ln})
+        repeated = {line for line, count in edges.items() if count >= max(2, len(split) * 0.6)}
+    cleaned = []
+    for lines in split:
+        body = [ln for ln in lines if not (ln.strip() and (_PAGE_NUMBER.match(ln.strip()) or norm(ln) in repeated))]
+        cleaned.append("\n".join(body).strip("\n"))
+    return "\n\n".join(c for c in cleaned if c.strip())
 
 
 def _docx(data: bytes, progress: Progress) -> ExtractionResult:

@@ -239,8 +239,8 @@ def _dates_mode(text, facts, length, title, insights=None, **_):
     for d in (insights or {}).get("dates", []):
         days = (date.fromisoformat(d["iso"]) - date.today()).days
         upcoming += days >= 0
-        what = d["context"].replace("|", "/")[:140]
-        kind = roles.get(d["iso"]) or kinds.get(d["label"], "Other")
+        what = (d.get("topic") or d["context"]).replace("|", "/")[:140]
+        kind = roles.get(d["iso"]) or ("Planned" if d.get("items") else kinds.get(d["label"], "Other"))
         when = brief._rel(days)
         rows.append(f"| **{d['text']}** | {what} | {kind} | {when} |")
         if d["label"] in {"expiry", "deadline"} or d["iso"] in roles and roles[d["iso"]] in {"Due", "Renewal due", "Expires / valid till"}:

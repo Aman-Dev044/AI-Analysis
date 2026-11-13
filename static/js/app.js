@@ -1057,7 +1057,12 @@
     h += dates.length ? '<div class="timeline">' + dates.slice(0, 40).map(function (d) {
       return '<div class="tl-item ' + (d.days_from_today < 0 ? "past " : "") + esc(d.label) + '"><b>' + fmtDate(d.iso, { day: "numeric", month: "short", year: "numeric" }) + "</b> " +
         '<span class="badge">' + esc(d.label) + "</span>" + (d.ambiguous ? ' <span class="badge warn">check format</span>' : "") +
-        ' <span class="muted" style="font-size:11.5px">' + relDays(d.days_from_today) + "</span><p>" + esc(d.context) + "</p></div>";
+        ' <span class="muted" style="font-size:11.5px">' + relDays(d.days_from_today) + "</span>" +
+        (d.items && d.items.length
+          ? '<div class="routine" style="margin-top:6px">' + d.items.map(function (it) {
+              return "<div><span>" + esc(it.time || "—") + "</span>" + esc(it.what) + "</div>";
+            }).join("") + "</div>"
+          : "<p>" + esc(d.topic || d.context) + "</p>") + "</div>";
     }).join("") + "</div>" : '<p class="muted" style="font-size:13px">No dates detected.</p>';
     h += calendarEventsMarkup(doc.calendar_event_status, doc.calendar_events);
     function chips(title, ic, arr, cls) {

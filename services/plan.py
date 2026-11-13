@@ -7,6 +7,8 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+from services import insights
+
 _DATE = r"\d{1,2}\s+[A-Za-z]+\s+\d{4}"
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
 _QUARTER = re.compile(
@@ -162,5 +164,41 @@ def tabular_schedule(text: str, today: Optional[date] = None) -> Optional[dict]:
     }
 
 
+def agenda_schedule(text: str, today: Optional[date] = None) -> Optional[dict]:
+    """Date headings with entries under them ("Sat, 14 Nov" / "10:00–12:00" / "Organise your room"), the way PDF
+    tables, notes and itineraries usually come out as text. Shows today's entries, or the next planned day."""
+    today = today or date.today()
+    days = insights.schedule(insights.extract_dates(text, today, limit=None))
+    if not days:
+        return None
+    start, end = date.fromisoformat(days[0]["iso"]), date.fromisoformat(days[-1]["iso"])
+    current = next((d for d in days if d["iso"] == today.isoformat()), None)
+    upcoming = current or next((d for d in days if d["iso"] > today.isoformat()), None)
+
+    def entries(day):
+        out = []
+        for item in (day or {}).get("items", []):
+            parts = re.split(r"\s*(?:-|–|—|to)\s*", item["time"], maxsplit=1) if item["time"] else [""]
+            out.append({"activity": item["what"], "start": parts[0], "end": parts[1] if len(parts) > 1 else "",
+                        "category": "", "location": ""})
+        return out
+
+    if current:
+        focus = current["items"][0]["what"]
+    elif upcoming:
+        nxt = date.fromisoformat(upcoming["iso"])
+        focus = f"Nothing planned today · next on {nxt.strftime('%a')}, {nxt.day} {nxt.strftime('%b')}"
+    else:
+        focus = "The schedule has ended."
+    return {
+        "kind": "tabular",
+        "start": start.isoformat(), "end": end.isoformat(),
+        "active": start <= today <= end,
+        "today": {"date": today.isoformat(), "weekday": today.strftime("%A"), "focus": focus},
+        "entries": entries(upcoming),
+        "days": len(days),
+    }
+
+
 def detect_plan(text: str, today: Optional[date] = None) -> Optional[dict]:
-    return structured_plan(text, today) or tabular_schedule(text, today)
+    return structured_plan(text, today) or tabular_schedule(text, today) or agenda_schedule(text, today)

@@ -570,5 +570,132 @@ class GoogleCalendarTests(unittest.TestCase):
         self.assertEqual(google_calendar._decrypt_token(encrypted, key), token_json)
 
 
+# A PDF timetable as PyMuPDF reads it: every cell on its own line, dates without a year.
+PDF_SCHEDULE = """TWO-WEEK PERSONAL SCHEDULE
+14 November – 27 November 2026 | Suggested plan (local time)
+Date
+Time
+Plan
+Sat, 14 Nov
+10:00–12:00
+Organise your room, personal tasks and upcoming priorities
+16:00–18:00
+Visit a nearby park or local attraction with family/guardian
+Sun, 15 Nov
+09:00–11:00
+Relaxed morning, breakfast and weekly planning
+Mon, 16 Nov
+09:30–11:30
+Important work: list goals, deadlines and pending tasks
+14:00–16:00
+Study or skill-building session; review progress
+Tue, 17 Nov
+10:00–12:00
+Dentist appointment in the city
+100-word plan paragraph
+Over the next two weeks, I will follow a balanced schedule that gives equal importance to responsibilities.
+"""
+
+MESSY_NOTE = """hi team,, quick update.   the client meeting is on 18th nov at 3 pm in the main office pls be on time. also the design review moved to Nov 21 , and final submission deadline is 30 November 2026 no extensions!!
+budget approval needed before 5 dec.
+"""
+
+
+class DateUnderstandingTests(unittest.TestCase):
+    TODAY = date(2026, 11, 13)
+
+    def test_dates_without_a_year(self):
+        self.assertEqual(insights.parse_date("Sat, 14 Nov", today=self.TODAY), (date(2026, 11, 14), False))
+        self.assertEqual(insights.parse_date("Nov 14th", year=2026), (date(2026, 11, 14), False))
+        parsed, ambiguous = insights.parse_date("14 November", today=self.TODAY)
+        self.assertEqual(parsed, date(2026, 11, 14))
+        self.assertTrue(ambiguous)  # year guessed, no weekday to confirm it
+        # A weekday that does not fit the stated date is flagged for checking.
+        self.assertTrue(insights.parse_date("Thursday 14 November 2026")[1])
+
+    def test_lowercase_may_is_not_a_date(self):
+        found = insights.extract_dates("Step 1 may take a while. Due on 9 May.", today=self.TODAY)
+        self.assertEqual([d["text"] for d in found], ["9 May"])
+
+    def test_pdf_schedule_dates_and_entries(self):
+        dates = insights.extract_dates(PDF_SCHEDULE, today=self.TODAY)
+        by_iso = {d["iso"]: d for d in dates}
+        self.assertEqual(sorted(by_iso), ["2026-11-14", "2026-11-15", "2026-11-16", "2026-11-17", "2026-11-27"])
+        sat = by_iso["2026-11-14"]
+        self.assertEqual(sat["items"][0], {"time": "10:00–12:00",
+                                           "what": "Organise your room, personal tasks and upcoming priorities"})
+        self.assertEqual(len(sat["items"]), 2)
+        # The entry list ends before the prose paragraph that follows the last day.
+        self.assertEqual([i["what"] for i in by_iso["2026-11-17"]["items"]], ["Dentist appointment in the city"])
+        # "...review progress" on the line above is an entry, not a label for the next date.
+        self.assertEqual(by_iso["2026-11-17"]["label"], "mentioned")
+
+        info = insights.analyze(PDF_SCHEDULE, today=self.TODAY)
+        self.assertEqual(info["doc_type"], "Work plan / schedule")
+        self.assertEqual(len(info["schedule"]), 4)
+
+    def test_prose_dates_get_their_sentence(self):
+        dates = {d["text"]: d for d in insights.extract_dates(MESSY_NOTE, today=self.TODAY)}
+        self.assertEqual(dates["18th nov"]["iso"], "2026-11-18")
+        self.assertIn("client meeting", dates["18th nov"]["topic"])
+        self.assertNotIn("design review", dates["18th nov"]["topic"])
+        self.assertEqual(dates["5 dec"]["label"], "deadline")
+        self.assertEqual(dates["5 dec"]["topic"], "budget approval needed before 5 dec.")
+
+    def test_list_notes_with_inline_times(self):
+        text = "MONDAY 16 NOVEMBER\n- standup 9:30\n- send report to manager\n\nNov 19 (Thu)\nflight to Mumbai 7:45 am, return 22 Nov\n"
+        days = insights.schedule(insights.extract_dates(text, today=self.TODAY))
+        self.assertEqual([d["iso"] for d in days], ["2026-11-16", "2026-11-19"])
+        self.assertEqual(days[0]["items"], [{"time": "9:30", "what": "Standup"},
+                                            {"time": "", "what": "Send report to manager"}])
+        self.assertEqual(days[1]["items"], [{"time": "7:45 am", "what": "Flight to Mumbai, return 22 Nov"}])
+
+    def test_smart_brief_lists_the_schedule(self):
+        info = insights.analyze(PDF_SCHEDULE, today=self.TODAY)
+        info["fields"] = fields.extract_fields(PDF_SCHEDULE)
+        with mock.patch.object(summarizer.Config, "AI_BACKEND", "rules"), \
+                mock.patch.object(brief.Config, "AI_BACKEND", "rules"):
+            out = summarizer.summarize(PDF_SCHEDULE, mode="smart", insights=info)
+        self.assertIn("## Two-week Personal Schedule", out)
+        self.assertIn("### Schedule", out)
+        self.assertIn("| 10:00–12:00 | Organise your room, personal tasks and upcoming priorities |", out)
+
+    def test_prose_dates_appear_with_what_they_are_for(self):
+        info = insights.analyze(MESSY_NOTE, today=self.TODAY)
+        info["fields"] = fields.extract_fields(MESSY_NOTE)
+        facts = brief.collect(MESSY_NOTE, info, today=self.TODAY)
+        whats = {d["text"]: brief.date_what(d) for d in facts["dates"]}
+        self.assertIn("18th nov", whats)
+        self.assertIn("client meeting", whats["18th nov"].lower())
+
+    def test_agenda_plan_and_calendar_events(self):
+        p = plan.detect_plan(PDF_SCHEDULE, self.TODAY)
+        self.assertEqual(p["kind"], "tabular")
+        self.assertEqual(p["entries"][0]["activity"], "Organise your room, personal tasks and upcoming priorities")
+        self.assertEqual((p["entries"][0]["start"], p["entries"][0]["end"]), ("10:00", "12:00"))
+
+        dates = insights.extract_dates(PDF_SCHEDULE, today=self.TODAY, limit=None, deduplicate=False)
+        events = google_calendar.build_calendar_events("doc-1", "Schedule", dates, today=self.TODAY)
+        # Routine entries stay out; the appointment becomes one timed event.
+        self.assertEqual([e["summary"] for e in events], ["Meeting - Dentist appointment in the city"])
+        self.assertEqual(events[0]["start_local"], "2026-11-17T10:00:00")
+        self.assertEqual(events[0]["end_local"], "2026-11-17T12:00:00")
+
+    def test_page_numbers_and_running_headers_are_removed(self):
+        pages = ["Suggested personal schedule\nPage 1\nTWO-WEEK PLAN\nSat, 14 Nov",
+                 "Suggested personal schedule\nPage 2\nweather changes"]
+        text = extractor._strip_page_furniture(pages)
+        self.assertNotIn("Page 1", text)
+        self.assertNotIn("Suggested personal schedule", text)
+        self.assertTrue(text.startswith("TWO-WEEK PLAN"))
+
+    def test_long_single_line_text_stays_fast(self):
+        import time
+        line = "The deadline is 15 Jan 2027 and payment Rs. 5,000 is due before 2027-03-01. " * 6000
+        started = time.monotonic()
+        insights.analyze(line)
+        self.assertLess(time.monotonic() - started, 10)
+
+
 if __name__ == "__main__":
     unittest.main()

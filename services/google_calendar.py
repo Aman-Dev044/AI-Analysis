@@ -19,7 +19,7 @@ import requests
 from config import Config
 from db import get_db, oid, utcnow
 from services import tabular
-from services.insights import parse_date
+from services.insights import parse_date, schedule as agenda_days
 
 log = logging.getLogger(__name__)
 google_calendar_bp = Blueprint("google_calendar", __name__)
@@ -187,6 +187,17 @@ def build_calendar_events(
             })
     else:
         schedule_items = dates
+        # Date headings with entries under them (a PDF timetable read as text) are a schedule as well: one
+        # event per entry, filtered like schedule tables so routine entries stay out of the calendar.
+        agenda = agenda_days(dates)
+        if agenda:
+            is_schedule = True
+            schedule_items = [{
+                "iso": day["iso"],
+                "ambiguous": day["ambiguous"],
+                "event_context": " | ".join(part for part in (day["text"], item["time"], item["what"]) if part),
+                "event_title": item["what"],
+            } for day in agenda for item in day["items"]]
 
     for item in schedule_items:
         if item.get("ambiguous"):
@@ -220,7 +231,7 @@ def build_calendar_events(
         summary = (
             f"High priority - {high_priority_title}"
             if high_priority_title
-            else f"{event_type.title()} - {item.get('event_title') or item.get('context') or context or document_title}".strip(" -")
+            else f"{event_type.title()} - {item.get('event_title') or item.get('topic') or item.get('context') or context or document_title}".strip(" -")
         )
         event = {
             "id": "a" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),

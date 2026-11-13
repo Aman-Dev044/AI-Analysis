@@ -17,6 +17,8 @@ from services.insights import DATE_RE, parse_date
 OverviewFn = Callable[[Optional[str]], None]  # streamed overview text (None while not started)
 
 POINTS = {"brief": 3, "standard": 5, "comprehensive": 8}
+SCHEDULE_ROWS = {"brief": 10, "standard": 30, "comprehensive": 80}
+MAX_DATES = 12
 SENTENCES = {"brief": "2-3", "standard": "3-4", "comprehensive": "4-6"}
 NUM_PREDICT = {"brief": 160, "standard": 240, "comprehensive": 380}
 ID_TYPES = {"Driving licence", "Passport", "PAN card", "Aadhaar card", "Certificate", "Insurance policy",
@@ -54,13 +56,35 @@ def collect(text: str, insights: dict, today: Optional[date] = None, length: str
                 f["days_from_today"] = (date.fromisoformat(f["iso"]) - today).days
     dates = fields_mod.key_dates(flds, insights)
     doc_type = insights.get("doc_type") or "General document"
+    plan_days = insights.get("schedule") or []
+    is_id = doc_type in ID_TYPES
+    topics = {}
+    for d in insights.get("dates", []):
+        topics.setdefault(d["iso"], d.get("topic") or "")
+    if plan_days:  # the schedule table lists these days with their entries
+        planned = {d["iso"] for d in plan_days}
+        dates = [d for d in dates if d["iso"] not in planned]
+    elif not is_id:  # dates with no label still matter when the text says what happens on them
+        seen = {d["iso"] for d in dates}
+        for d in insights.get("dates", []):
+            if len(dates) >= MAX_DATES:
+                break
+            if d["label"] == "mentioned" and d.get("topic") and d["iso"] not in seen:
+                dates.append({"text": d["text"], "iso": d["iso"], "what": "Event", "role": "event", "source": "text",
+                              "days_from_today": d["days_from_today"], "ambiguous": d.get("ambiguous", False)})
+                seen.add(d["iso"])
+        dates.sort(key=lambda d: d["iso"])
     sents = extractive.sentences(text)
     for d in dates:
         d["days_from_today"] = (date.fromisoformat(d["iso"]) - today).days
         # What the date is about, from the sentence it appears in ("Regional heads should submit forecasts").
-        src = "" if d.get("source") == "field" else next(
+        topic = topics.get(d["iso"], "")
+        src = "" if d.get("source") == "field" else topic if d["text"] in topic else next(
             (s for s in sents if d["text"] in s and not extractive.is_label_line(s)), "")
         d["detail"] = extractive.context(src, d["text"]) if src else ""
+        if not d["detail"] and d.get("source") != "field" and topics.get(d["iso"]):
+            topic = topics[d["iso"]]
+            d["detail"] = topic if len(topic) <= 120 else topic[:119].rstrip() + "…"
 
     expiry = None
     expiries = [d for d in dates if d["role"] == "expiry_date" and (d.get("source") == "field" or doc_type in VALIDITY_TYPES)]
@@ -71,8 +95,8 @@ def collect(text: str, insights: dict, today: Optional[date] = None, length: str
         expiry = {"text": e["text"], "iso": e["iso"], "days": days, "status": status, "ambiguous": e["ambiguous"]}
 
     by_key = {f["key"]: f for f in flds}
-    is_id = doc_type in ID_TYPES
-    points = [] if is_id else extractive.key_sentences(text, limit=POINTS.get(length, 5))
+    # In a schedule the "key sentences" would just be random entries; the schedule table shows them all.
+    points = [] if is_id or plan_days else extractive.key_sentences(text, limit=POINTS.get(length, 5))
     return {
         "doc_type": doc_type,
         "title": "" if is_id else extractive.doc_title(text),
@@ -82,6 +106,9 @@ def collect(text: str, insights: dict, today: Optional[date] = None, length: str
         "fields": flds,
         "by_key": by_key,
         "dates": dates,
+        "schedule": plan_days,
+        "schedule_rows": SCHEDULE_ROWS.get(length, 30),
+        "today": today,
         "expiry": expiry,
         "amounts": insights.get("amounts", [])[:6],
         "emails": insights.get("emails", [])[:2],
@@ -205,6 +232,56 @@ def dates_table(facts: dict, title: str = "### Important dates") -> str:
     return f"{title}\n\n| Date | What | When |\n|---|---|---|\n" + "\n".join(lines)
 
 
+def _day(d: dict) -> str:
+    """"Sat, 14 Nov 2026": the document's own wording when it is complete, else built from the date."""
+    if re.search(r"[A-Za-z]{3}", d["text"]) and re.search(r"\d{4}", d["text"]):
+        return d["text"]
+    day = date.fromisoformat(d["iso"])
+    return f"{day.strftime('%a')}, {day.day} {day.strftime('%b %Y')}"
+
+
+def schedule_table(facts: dict) -> str:
+    """Day-by-day plan: every date with what is planned and when, as written in the document."""
+    days = facts.get("schedule") or []
+    if not days:
+        return ""
+    limit, rows, shown = facts.get("schedule_rows", 30), [], 0
+    today = facts.get("today") or date.today()
+    for d in days:
+        day = f"**{_day(d)}**" + (" · *today*" if d["iso"] == today.isoformat() else "")
+        for n, item in enumerate(d["items"]):
+            if shown >= limit:
+                break
+            rows.append(f"| {day if n == 0 else ''} | {_cell(item['time']) or '—'} | {_cell(item['what'])} |")
+            shown += 1
+    total = sum(len(d["items"]) for d in days)
+    more = f"\n\n*Showing {shown} of {total} entries — choose a longer length to see all.*" if shown < total else ""
+    return "### Schedule\n\n| Day | Time | Plan |\n|---|---|---|\n" + "\n".join(rows) + more
+
+
+def schedule_overview(facts: dict) -> str:
+    days = facts.get("schedule") or []
+    if not days:
+        return ""
+    today = facts.get("today") or date.today()
+    start, end = date.fromisoformat(days[0]["iso"]), date.fromisoformat(days[-1]["iso"])
+    total = sum(len(d["items"]) for d in days)
+    line = (f"This schedule covers **{_day(days[0])}** to **{_day(days[-1])}**: **{total}** planned "
+            f"entr{'y' if total == 1 else 'ies'} over **{len(days)}** day(s).")
+    if start <= today <= end:
+        line += " It is **in progress** today."
+    elif today < start:
+        line += f" It starts {_rel((start - today).days)}."
+    else:
+        line += " All of its days are in the past."
+    nxt = next((d for d in days if d["iso"] >= today.isoformat()), None)
+    if nxt:
+        first = nxt["items"][0]
+        when = f" at **{first['time']}**" if first["time"] else ""
+        line += f" Next up: **{_day(nxt)}**{when} — {first['what'].rstrip('.')}."
+    return line
+
+
 def topics_line(facts: dict) -> str:
     topics = facts.get("topics") or []
     return "**Main topics:** " + " · ".join(topics) if len(topics) >= 2 else ""
@@ -228,7 +305,7 @@ def compose(facts: dict, overview: Optional[str], title: str = "") -> str:
     parts.append(topics_line(facts))
 
     points = point_lines(facts["points"], overview)
-    blocks = [details_table(facts), dates_table(facts)]
+    blocks = [schedule_table(facts), details_table(facts), dates_table(facts)]
     if points:  # prose documents: what it says first, then the reference tables
         blocks = ["### Key points\n\n" + points, figures_table(facts)] + blocks
     parts += blocks
@@ -239,6 +316,8 @@ def compose(facts: dict, overview: Optional[str], title: str = "") -> str:
 
 # ------------------------------------------------------------------ overview
 def fallback_overview(facts: dict) -> str:
+    if facts.get("schedule"):
+        return schedule_overview(facts)
     k = facts["by_key"]
     subject = next((k[x]["value"] for x in SUBJECT_KEYS if x in k), None)
     doc = facts["doc_type"] if facts["doc_type"] != "General document" else "This document"
@@ -282,6 +361,9 @@ def _facts_text(facts: dict) -> str:
     lines += [f"{d['what']}: {d['text']}" + (f" ({d['detail']})" if d.get("detail") else "") for d in facts["dates"]]
     if facts.get("topics"):
         lines.append("Main topics: " + ", ".join(facts["topics"]))
+    for d in (facts.get("schedule") or [])[:14]:
+        lines.append(f"Planned on {_day(d)} ({d['iso']}): " + "; ".join(
+            (f"{i['time']} " if i["time"] else "") + i["what"] for i in d["items"][:4]))
     if facts["expiry"]:
         e = facts["expiry"]
         lines.append({"expired": f"Status: expired ({_rel(e['days'])})",
