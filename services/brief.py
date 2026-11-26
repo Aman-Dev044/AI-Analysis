@@ -22,7 +22,7 @@ MAX_DATES = 12
 SENTENCES = {"brief": "2-3", "standard": "3-4", "comprehensive": "4-6"}
 NUM_PREDICT = {"brief": 160, "standard": 240, "comprehensive": 380}
 ID_TYPES = {"Driving licence", "Passport", "PAN card", "Aadhaar card", "Certificate", "Insurance policy",
-            "Marksheet / Result"}
+            "Marksheet / Result", "Voter ID", "Visa", "Visa application"}
 # Documents whose own validity is the point. Elsewhere an "expires on" in the text (e.g. a vendor contract
 # mentioned in a report) is just a date, not the document's status, unless it is a labelled field.
 VALIDITY_TYPES = ID_TYPES | {"Contract / Agreement"}
@@ -56,8 +56,11 @@ def collect(text: str, insights: dict, today: Optional[date] = None, length: str
                 f["days_from_today"] = (date.fromisoformat(f["iso"]) - today).days
     dates = fields_mod.key_dates(flds, insights)
     doc_type = insights.get("doc_type") or "General document"
-    plan_days = insights.get("schedule") or []
     is_id = doc_type in ID_TYPES
+    # An ID card's dates sit above their labels the way a schedule's entries sit under a date: not a plan.
+    plan_days = [] if is_id else insights.get("schedule") or []
+    if plan_days and {d["iso"] for d in plan_days} <= {f["iso"] for f in flds if f.get("iso")}:
+        plan_days = []  # every "day" is a labelled field (Issue date, Expiry date): a record, not a plan
     topics = {}
     for d in insights.get("dates", []):
         topics.setdefault(d["iso"], d.get("topic") or "")
@@ -85,6 +88,8 @@ def collect(text: str, insights: dict, today: Optional[date] = None, length: str
         if not d["detail"] and d.get("source") != "field" and topics.get(d["iso"]):
             topic = topics[d["iso"]]
             d["detail"] = topic if len(topic) <= 120 else topic[:119].rstrip() + "…"
+        if not re.search(r"[A-Za-z]{3,}\s+[A-Za-z]{3,}", d["detail"]):
+            d["detail"] = ""  # form fragments ("& Date R131468443 /") say nothing about the date
 
     expiry = None
     expiries = [d for d in dates if d["role"] == "expiry_date" and (d.get("source") == "field" or doc_type in VALIDITY_TYPES)]
@@ -96,7 +101,9 @@ def collect(text: str, insights: dict, today: Optional[date] = None, length: str
 
     by_key = {f["key"]: f for f in flds}
     # In a schedule the "key sentences" would just be random entries; the schedule table shows them all.
-    points = [] if is_id or plan_days else extractive.key_sentences(text, limit=POINTS.get(length, 5))
+    # An ID card's facts are its fields; a blank form or an information sheet about an ID still has sentences.
+    record = is_id and any(f["key"] in {"name", "full_name"} for f in flds)
+    points = [] if record or plan_days else extractive.key_sentences(text, limit=POINTS.get(length, 5))
     return {
         "doc_type": doc_type,
         "title": "" if is_id else extractive.doc_title(text),
@@ -112,7 +119,9 @@ def collect(text: str, insights: dict, today: Optional[date] = None, length: str
         "expiry": expiry,
         "amounts": insights.get("amounts", [])[:6],
         "emails": insights.get("emails", [])[:2],
-        "phones": insights.get("phones", [])[:2],
+        # A number already shown as an ID (Aadhaar, invoice no.) is not also a phone number.
+        "phones": [p for p in insights.get("phones", []) if re.sub(r"\D", "", p) not in
+                   {re.sub(r"\D", "", f["value"]) for f in flds if f["kind"] == "id"}][:2],
         "points": points,
         "actions": _actions(dates, expiry, insights, today),
     }

@@ -697,5 +697,178 @@ class DateUnderstandingTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10)
 
 
+class OcrTests(unittest.TestCase):
+    @staticmethod
+    def _page(scale: float = 1.0):
+        import cv2
+        import numpy as np
+
+        img = np.full((900, 1400, 3), 255, np.uint8)
+        for i, line in enumerate(["DRIVING LICENCE", "Name: Aman Sharma", "Valid Till: 20/10/2030"]):
+            cv2.putText(img, line, (80, 200 + i * 220), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 4)
+        if scale != 1.0:
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        return img
+
+    def test_blur_and_low_resolution_are_detected(self):
+        import cv2
+        from services import image_enhance
+
+        sharp = self._page()
+        self.assertFalse(image_enhance.assess(sharp)["blurry"])
+        self.assertTrue(image_enhance.assess(cv2.GaussianBlur(sharp, (0, 0), 4))["blurry"])
+        self.assertTrue(image_enhance.assess(self._page(scale=0.4))["low_res"])
+
+    def test_variants_keep_geometry_or_report_the_scale(self):
+        from services import image_enhance
+
+        small = self._page(scale=0.4)
+        versions, info = image_enhance.variants(image_enhance.to_png(small))
+        self.assertTrue(info["low_res"])
+        self.assertEqual([label for label, _, _ in versions], ["original", "contrast", "sharpened", "enlarged"])
+        for label, image, scale in versions:
+            self.assertEqual(image.shape[:2], (round(small.shape[0] * scale), round(small.shape[1] * scale)), label)
+        self.assertGreater(versions[-1][2], 2)
+        large, _ = image_enhance.variants(image_enhance.to_png(self._page()))
+        self.assertEqual(len(large), 3)  # a large image is not enlarged
+        self.assertEqual(len(image_enhance.variants(image_enhance.to_png(small), max_variants=1)[0]), 1)
+
+    def test_pieces_rebuild_reading_order_and_drop_unsure_text(self):
+        pieces = [(10, 30, 300, 400, "Sharma", 0.97), (12, 31, 100, 280, "Name: Aman", 0.98),
+                  (60, 80, 100, 400, "Valid Till 20/10/2030", 0.95), (100, 120, 100, 130, "#@!", 0.2)]
+        self.assertEqual(extractor.pieces_to_text(pieces), "Name: Aman Sharma\nValid Till 20/10/2030")
+        self.assertGreater(extractor.mean_confidence(pieces), 0.9)
+
+    def test_fusion_prefers_agreement_then_confidence_per_region(self):
+        original = [(0, 20, 0, 300, "Valid Till 2O/1O/2O3O", 0.99), (40, 60, 0, 300, "Name: Aman Sharma", 0.96)]
+        contrast = [(1, 21, 2, 298, "Valid Till 20/10/2030", 0.90), (41, 61, 0, 300, "Name: Aman Sharma", 0.95),
+                    (80, 100, 0, 200, "DOB 01/07/2000", 0.93)]
+        sharpened = [(0, 20, 0, 140, "Valid Till", 0.92), (0, 20, 150, 300, "20/10/2030", 0.88),
+                     (40, 60, 0, 300, "Narne: Aman Sharrna", 0.99), (120, 140, 0, 50, "~", 0.6)]
+        fused = extractor.fuse_passes([original, contrast, sharpened])
+        # Two versions agree on the date (one split into two boxes), and on the name, despite one confident misread;
+        # a line only one version saw is kept when confident, dropped when not.
+        self.assertEqual(extractor.pieces_to_text(fused),
+                         "Valid Till 20/10/2030\nName: Aman Sharma\nDOB 01/07/2000")
+        self.assertEqual(extractor.fuse_passes([original]), original)
+
+    def test_versions_are_read_and_mapped_back_before_fusing(self):
+        from services import image_enhance
+
+        data = image_enhance.to_png(self._page(scale=0.4))  # 560 px wide: gets an enlarged version
+        seen = []
+
+        def engine(image):
+            seen.append(image.shape[1])
+            f = image.shape[1] / 560
+            return [(10 * f, 30 * f, 10 * f, 300 * f, "Valid Till 20/10/2030" if len(seen) > 1 else "Va1id Ti11", 0.9)]
+
+        def paddle(_image):
+            raise ImportError("paddleocr is not installed")
+
+        with mock.patch.dict(extractor._ENGINES, {"paddle": paddle, "rapid": engine}), \
+                mock.patch.object(extractor.Config, "OCR_ENGINE", "auto"), \
+                mock.patch.object(extractor.Config, "OCR_ENHANCE", True), \
+                mock.patch.object(extractor.Config, "OCR_MAX_PASSES", 4):
+            text, label = extractor.ocr_image(data)
+        self.assertEqual(seen, [560, 560, 560, 1600])
+        self.assertEqual(text, "Valid Till 20/10/2030")
+        self.assertEqual(label, "RapidOCR · 4 passes · 90%")
+
+    def test_columns_stay_apart_and_tall_pieces_do_not_join_rows(self):
+        pieces = [(10, 30, 0, 120, "Insured Name", 0.99), (10, 30, 200, 330, "Mr Nilanjan Sen", 0.99),
+                  (10, 30, 420, 560, "Geographical Area", 0.99), (60, 80, 0, 120, "Date of Issue", 0.99),
+                  (5, 85, 600, 640, "Signature", 0.9), (60, 80, 200, 330, "28/02/2020", 0.99)]
+        self.assertEqual(extractor.pieces_to_text(pieces),
+                         "Insured Name   Mr Nilanjan Sen   Geographical Area\nSignature\nDate of Issue   28/02/2020")
+
+    def test_hindi_and_english_halves_of_a_label_are_merged(self):
+        self.assertEqual(extractor._merge_hindi("2/DOB : 01/01/1964", 0.89, "जन्म तिथि/0: 011964", 0.84),
+                         ("जन्म तिथि / DOB : 01/01/1964", 0.84))
+        self.assertEqual(extractor._merge_hindi("FaHTST", 0.59, "विभाग", 0.98), ("विभाग", 0.98))
+        self.assertIsNone(extractor._merge_hindi("INCOME TAX DEPARTMENT", 0.98, "INCOME TAX DEPARTMENT", 1.0))
+
+    def test_glued_words_are_split_but_names_kept(self):
+        self.assertEqual(extractor.respace("PermanentAccountNumber card"), "Permanent Account Number card")
+        self.assertEqual(extractor.respace("Rambhrose"), "Rambhrose")
+
+
+class IdNumberTests(unittest.TestCase):
+    MRZ = "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<\nL898902C36UTO7408122F1204159ZE184226B<<<<<10"  # ICAO specimen
+
+    def test_checksums_and_ocr_lookalikes(self):
+        from services import id_numbers
+
+        found = {(i["key"], i["value"]) for i in id_numbers.find_ids(
+            "PAN ABCPEI234F  Aadhaar 2345 6789 0124  VID : 9123 4567 8901 2346  EPIC ZVF2O36291  2345 6789 0125")}
+        self.assertIn(("pan", "ABCPE1234F"), found)
+        self.assertIn(("aadhaar", "2345 6789 0124"), found)
+        self.assertIn(("vid", "9123 4567 8901 2346"), found)
+        self.assertIn(("voter_id", "ZVF2036291"), found)
+        self.assertNotIn(("aadhaar", "2345 6789 0125"), found)  # fails the Verhoeff check
+        self.assertNotIn(("aadhaar", "9123 4567 8901"), found)  # the start of the VID, not an Aadhaar number
+
+    def test_passport_machine_readable_zone(self):
+        from services import id_numbers
+
+        mrz = id_numbers.parse_mrz(self.MRZ, date(2026, 1, 1))
+        self.assertEqual((mrz["number"], mrz["surname"], mrz["given_names"], mrz["dob"], mrz["expiry"], mrz["sex"]),
+                         ("L898902C3", "Eriksson", "Anna Maria", "1974-08-12", "2012-04-15", "Female"))
+        garbled = self.MRZ.replace("7408122", "74O8122").replace("<<<<<<<<<<<<<<<<<<<", "«««««««««")
+        self.assertEqual(id_numbers.parse_mrz(garbled, date(2026, 1, 1))["dob"], "1974-08-12")
+        self.assertIsNone(id_numbers.parse_mrz(self.MRZ.replace("7408122", "7408123"), date(2026, 1, 1))["dob"])
+
+    def test_id_card_fields_from_ocr_layout(self):
+        text = ("भारत सरकार\nGovernment of India\nRam Prasad\nजन्म तिथि / DOB : 01/01/1964\nपुरुष / Male\n"
+                "2345 6789 0124\nमेरा आधार, मेरी पहचान")
+        got = {f["key"]: f["value"] for f in fields.extract_fields(text, date(2026, 1, 1))}
+        self.assertEqual(got["name"], "Ram Prasad")
+        self.assertEqual(got["dob"], "01/01/1964")
+        self.assertEqual(got["gender"], "Male")
+        self.assertEqual(got["aadhaar"], "2345 6789 0124")
+        self.assertEqual(insights.detect_type(text), "Aadhaar card")
+
+    def test_passport_fields_come_from_the_mrz(self):
+        got = {f["key"]: f for f in fields.extract_fields(
+            "Nationality qqte.IPassport No.\nDate of Expiry\n" + self.MRZ, date(2026, 1, 1))}
+        self.assertEqual(got["passport_no"]["value"], "L898902C3")
+        self.assertTrue(got["passport_no"]["verified"])
+        self.assertEqual(got["expiry_date"]["iso"], "2012-04-15")
+        self.assertEqual(got["name"]["value"], "Anna Maria Eriksson")
+        self.assertEqual(got["nationality"]["value"], "UTO")
+
+    def test_form_layouts(self):
+        today = date(2026, 1, 1)
+        got = {f["key"]: f["value"] for f in fields.extract_fields(
+            "Policy No.& Type   3001/MI-10124270/00/000   Period of Insurance   17-Jul-2021 to 16-Jul-2022\n"
+            "Insured Name   Mr Nilanjan Sen   Geographical Area   INDIA\n"
+            "CGST@9%   410.85\n"
+            "Surname (As in Passport)   MIAH\n", today)}
+        self.assertEqual(got["policy_no"], "3001/MI-10124270/00/000")
+        self.assertEqual((got["valid_from"], got["expiry_date"]), ("17-Jul-2021", "16-Jul-2022"))
+        self.assertEqual(got["name"], "Mr Nilanjan Sen")
+        self.assertEqual(got["tax"], "410.85")
+        self.assertEqual(got["surname"], "MIAH")
+        visa = {f["key"]: f["value"] for f in fields.extract_fields(
+            "Date of lssue   Date ofExpiy(DD/MM/YYYY)\n27/12/2016   26706/2017", today)}
+        self.assertEqual((visa["issue_date"], visa["expiry_date"]), ("27/12/2016", "26/06/2017"))
+
+    def test_misspelt_and_spaceless_labels(self):
+        got = {f["key"]: f["value"] for f in fields.extract_fields(
+            "Dateof Birth/Age: 12-07-2000\nPaceof Issue\nKOLKATA\nDateo Epiy\n2710212030", date(2026, 1, 1))}
+        self.assertEqual(got["dob"], "12-07-2000")
+        self.assertEqual(got["authority"], "KOLKATA")
+        self.assertEqual(got["expiry_date"], "27/02/2030")
+
+    def test_only_real_phone_numbers(self):
+        self.assertTrue(insights.is_phone("+880194417423"))
+        self.assertTrue(insights.is_phone("0120-2770078"))
+        self.assertTrue(insights.is_phone("98765 43210"))
+        self.assertTrue(insights.is_phone("18005720197"))
+        self.assertFalse(insights.is_phone("2345 6789 0124"))  # Aadhaar
+        self.assertFalse(insights.is_phone("18062195319"))  # invoice number
+        self.assertFalse(insights.is_phone("2710212030"))  # a date OCR glued together
+
+
 if __name__ == "__main__":
     unittest.main()

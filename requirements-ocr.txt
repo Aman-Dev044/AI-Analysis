@@ -1,4 +1,5 @@
-# Optional, heavy: high-accuracy OCR for scans/photos (CPU). Tesseract or an Ollama vision model also work.
+# Optional, heavy: PaddleOCR 3 (OCR_ENGINE=paddle). The default RapidOCR runs the same PP-OCRv5 models on
+# ONNX Runtime and is much faster on CPU; PaddlePaddle can take minutes per photo or hang on Windows.
 paddleocr>=3.0
 paddlepaddle>=3.0
 opencv-python-headless>=4.9

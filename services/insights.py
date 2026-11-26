@@ -25,6 +25,8 @@ DATE_RE = re.compile(
     rf"(?P<dmy>{_WD}\d{{1,2}}{_ORD}\s+(?:of\s+)?(?:{MONTHS})\.?,?\s+\d{{4}})"
     rf"|(?P<mdy>{_WD}(?:{MONTHS})\.?\s+\d{{1,2}}{_ORD},?\s+\d{{4}})"
     rf"|(?P<iso>\d{{4}}-\d{{1,2}}-\d{{1,2}})"
+    # Forms and policy schedules: "09-NOV-2005", "17-Jul-2021", "10/Jun/2021".
+    rf"|(?P<dmyh>\d{{1,2}}[-/](?:{MONTHS})[-/]\d{{4}})"
     rf"|(?P<num>\d{{1,2}}[./-]\d{{1,2}}[./-]\d{{4}})"
     # Schedules and letters often leave the year out: "Sat, 14 Nov", "Nov 14th".
     rf"|(?P<dm>{_WD}\d{{1,2}}{_ORD}\s+(?:of\s+)?(?:{_MONTHS_NO_YEAR})\.?)"
@@ -40,7 +42,7 @@ _WEEKDAY_NUM = {name.lower(): i % 7 for i, name in enumerate(
     "Monday Tuesday Wednesday Thursday Friday Saturday Sunday Mon Tue Wed Thu Fri Sat Sun".split())}
 _WEEKDAY_NUM.update({"tues": 1, "thur": 3, "thurs": 3})
 _LEAD_WEEKDAY = re.compile(rf"^({WEEKDAYS})\.?,?\s+", re.I)
-_TEXT_DMY = re.compile(r"(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?([A-Za-z]+)\.?,?(?:\s+(\d{4}))?", re.I)
+_TEXT_DMY = re.compile(r"(\d{1,2})(?:st|nd|rd|th)?[\s\-/]+(?:of\s+)?([A-Za-z]+)\.?,?(?:[\s\-/]+(\d{4}))?", re.I)
 _TEXT_MDY = re.compile(r"([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?(?:\s+(\d{4}))?", re.I)
 _TIME_PART = r"\d{1,2}(?:[:.]\d{2})?\s*(?:[ap]\.?m\.?)?"
 # "10:00–12:00", "9.30 am - 11 am", "3 pm": a time (range) opening a schedule line.
@@ -69,6 +71,8 @@ PERCENT_RE = re.compile(r"\b\d+(?:\.\d+)?\s?%")
 DOC_TYPES = [
     ("Work plan / schedule", r"(?m)^Period:|\bquarterly review\b|\bwork schedule\b|\bweekly plan\b"),
     # A word like "invoice" or "passport" in passing ("Rahul will send the invoice") does not make the type.
+    # A policy schedule is often also a tax invoice: the policy is what the document is about.
+    ("Insurance policy", r"\bpolicy\s*schedule\b|\bcertificate\s*of\s*insurance\b|\bpolicy\s*no\b.*\bpremium\b"),
     ("Invoice", r"\binvoice\s*(?:no|number|#|date)\b|(?:^|\n)[ \t]*(?:tax[ \t]+)?invoice[ \t]*(?:\n|$)|\bGSTIN\b|\btax invoice\b|\bbill to\b"),
     ("Receipt", r"\breceipt\b|\bpayment received\b|\btransaction id\b"),
     ("Bank statement", r"\baccount statement\b|\bopening balance\b|\bclosing balance\b"),
@@ -79,9 +83,15 @@ DOC_TYPES = [
                              r"|^\W*[^\n]{0,60}\b(?:agreement|contract)\W*(?:\n|$)"),
     ("Insurance policy", r"\bpolicy\s*(?:no|number)\b|\bsum insured\b|\bpremium\b|\binsured\b"),
     ("Driving licence", r"\bdriving licen[cs]e\b"),
-    ("Passport", r"\bpassport\s*(?:no|number)\b|\bpassport\b.*\bnationality\b|\bnationality\b.*\bpassport\b"),
+    ("Visa application", r"\bvisa application\b"),
+    # The machine-readable zone starts "P<IND…" on a passport and "V<IND…" / "VTIND…" on a visa.
+    ("Visa", r"\bvisa\s*type\b|\bno\.?\s*of\s*entries\b|(?:^|\n)(?-i:V[A-Z<][A-Z]{3}[A-Z]*<<)"),
+    ("Passport", r"\bpassport\s*(?:no|number)\b|\bpassport\b.*\bnationality\b|\bnationality\b.*\bpassport\b"
+                 r"|(?:^|\n)(?-i:P<[A-Z]{3})"),
+    ("Voter ID", r"\belection\s*commission|\belector(?:'s)?\s*photo\b|\bEPIC\b"),
     ("PAN card", r"\bpermanent account number\b|\bincome tax department\b"),
-    ("Aadhaar card", r"\baadhaa?r\b|\bunique identification\b"),
+    ("Aadhaar card", r"\baadhaa?r\b|\bunique identification\b|आधार|\bVID\s*:"
+                     r"|government of india.*\b[2-9]\d{3} \d{4} \d{4}\b"),
     ("Marksheet / Result", r"\bmarksheet\b|\bmark\s+sheet\b|\bgrade card\b|\bcgpa\b|\bsgpa\b"),
     ("Certificate", r"\bcertificate\b|\bthis is to certify\b"),
     ("Legal notice", r"\blegal notice\b|\bhon'?ble court\b|\bpetitioner\b|\brespondent\b"),
@@ -472,15 +482,32 @@ def headings(text: str, limit: int = 20) -> list[str]:
     return _unique(found, limit)
 
 
+def is_phone(raw: str) -> bool:
+    """A real phone number, not just any long number (Aadhaar, invoice, policy and account numbers are long
+    too): an international "+…" number, an Indian mobile (6-9 + 9 digits, optionally 0 / 91 first), a landline
+    with its 0 STD code, a 1800 toll-free number, or a "(555) 123-4567" style number."""
+    digits = re.sub(r"\D", "", raw)
+    if not 10 <= len(digits) <= 13:
+        return False
+    if raw.lstrip().startswith("+"):
+        return True
+    if re.fullmatch(r"(?:91|0)?[6-9]\d{9}", digits) or re.fullmatch(r"0\d{9,10}", digits):
+        return not re.fullmatch(r"\s*\d{4}\s\d{4}\s\d{4}\s*", raw)  # 4-4-4 groups: an Aadhaar number
+    if re.fullmatch(r"18[06]0\d{6,7}", digits):
+        return True
+    return bool(re.fullmatch(r"\s*\(\d{3}\)\s?\d{3}[\s.-]\d{4}\s*|\s*\d{3}[.-]\d{3}[.-]\d{4}\s*", raw))
+
+
 def analyze(text: str, today: Optional[date] = None, soon_days: int = 30) -> dict:
     today = today or date.today()
     words = len(re.findall(r"\w+", text))
     dates = extract_dates(text, today)
-    phones = [p for p in PHONE_RE.findall(text) if 10 <= len(re.sub(r"\D", "", p)) <= 13]
+    phones = [p for p in PHONE_RE.findall(text) if is_phone(p)]
     upcoming = [d for d in dates if d["days_from_today"] >= 0 and d["label"] in {"deadline", "expiry", "review"}]
     plan_days = schedule(dates)
     doc_type = detect_type(text)
-    if plan_days and doc_type in {"General document", "Report", "Letter"}:
+    # Two dated lines (an ID card's issue and expiry dates) are not a schedule.
+    if len(plan_days) >= 3 and doc_type in {"General document", "Report", "Letter"}:
         doc_type = "Work plan / schedule"
     return {
         "doc_type": doc_type,

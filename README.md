@@ -26,8 +26,17 @@ upload shows live, stage-by-stage progress while the summary is written.
   **work-plan card** (today's focus, routine with the current slot highlighted, this week, month & quarter goals)
   for structured plans like `Period: … / YEAR n / QUARTER n / MONTH n` text files or date/activity CSV schedules.
 - **Long documents** — automatic map-reduce chunking so large files fit the model context.
-- **OCR** for photos, scans and scanned PDF pages — RapidOCR (pip-installed, works out of the box), with
-  PaddleOCR, Tesseract or an Ollama vision model as alternatives (auto-fallback).
+- **OCR** for photos, scans and scanned PDF pages — **RapidOCR** (PaddleOCR's PP-OCRv5 models on ONNX Runtime, a few
+  seconds per photo on a laptop CPU), with Tesseract, PaddleOCR (`requirements-ocr.txt`) or an Ollama vision model as
+  alternatives. Photos taken sideways are turned upright; Hindi (Devanagari) text is read with its own model, and
+  bilingual "हिंदी / English" labels keep both halves; spaces OCR drops in long printed lines are put back. Optional
+  multi-pass reading of OpenCV versions of the image (contrast, sharpening, enlarging) keeps the reading most versions
+  agree on. No generative model touches the pixels.
+- **ID numbers verified by checksum** — Aadhaar & VID (Verhoeff), GSTIN, and passport / visa machine-readable zones
+  (check digits) give name, number, nationality, date of birth and expiry exactly, even when OCR misread a character;
+  PAN, voter ID (EPIC), IFSC and vehicle numbers are recognised by format. Form layouts are understood too: labels
+  above or beside their values, two columns per row, misspelt labels, ranges like "Period of Insurance 17-Jul-2021 to
+  16-Jul-2022".
 - **Legacy .doc** read in pure Python (Word piece table); falls back to `antiword` / LibreOffice if present.
   **SVG** text is read directly, or the drawing is rendered and OCR'd when it has no text layer.
 - Auth (login / signup, hashed passwords), per-user isolation, light/dark theme, mobile layout.
@@ -68,7 +77,10 @@ database with `python seed.py --set-password` (users can also change it from **S
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | empty | Google OAuth web application credentials |
 | `GOOGLE_REDIRECT_URI` | `http://localhost:5000/google-calendar/callback` | Must exactly match the OAuth client redirect URI |
 | `GOOGLE_TOKEN_ENCRYPTION_KEY` | empty | Fernet key used to encrypt saved Google refresh tokens |
-| `OCR_ENGINE`, `TESSERACT_CMD` | `auto` | `auto` (rapid → paddle → tesseract → ollama), or one of `rapid`, `paddle`, `tesseract`, `ollama`, `off` |
+| `OCR_ENGINE`, `TESSERACT_CMD` | `auto` | `auto` (rapid → tesseract → ollama), or one of `paddle`, `rapid`, `tesseract`, `ollama`, `off` |
+| `OCR_RAPID_MODEL`, `OCR_HINDI` | `mobile`, `true` | RapidOCR model size (`server` is sharper but ~20× slower on CPU); read Devanagari text |
+| `OCR_PADDLE_DET_MODEL`, `OCR_PADDLE_REC_MODEL` | `PP-OCRv5_server_det`, `PP-OCRv5_server_rec` | PaddleOCR models, used only with `OCR_ENGINE=paddle` |
+| `OCR_ENHANCE`, `OCR_MAX_PASSES`, `OCR_GOOD_CONFIDENCE` | `true`, `1`, `0.95` | OpenCV versions, images read per photo (1–4; more is ~4× slower), confidence of a sharp photo's first read that skips the rest |
 | `CHUNK_CHARS`, `MAX_CHUNKS` | `12000`, `40` | long-document chunking |
 | `LONG_DOC_STRATEGY` | `extractive` | `extractive` (key sentences, fast) or `mapreduce` (model reads every part, slow on CPU) |
 | `AI_BACKEND` | `ollama` | `rules` runs every summary style and Ask AI without any model (instant, offline); with `ollama`, a failed model call falls back to rules |
@@ -107,8 +119,10 @@ config.py / db.py      settings, MongoDB access, file storage, seeding
 seed.py                one-off DB init + admin login
 services/
   extractor.py         PDF / DOC / DOCX / TXT / CSV / SVG / image text extraction + OCR engines
+  image_enhance.py     OpenCV versions of photos and scans for multi-pass OCR
   insights.py          deterministic dates, expiry, amounts, contacts, doc type
   fields.py            labelled key fields (Name, Licence No, Valid Till, Total…) incl. OCR layouts
+  id_numbers.py        Aadhaar / PAN / EPIC / GSTIN / passport numbers and MRZ, verified by checksum
   extractive.py        model-free key-sentence selection
   brief.py             Smart brief: facts + verified short AI overview
   rulebased.py         all summary styles + document Q&A without a model (AI_BACKEND=rules)

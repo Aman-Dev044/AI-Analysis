@@ -68,7 +68,18 @@ class Config:
 
     # OCR: auto | rapid | paddle | tesseract | ollama | off
     OCR_ENGINE = os.getenv("OCR_ENGINE", "auto").strip().lower()
+    # RapidOCR model size: mobile (seconds per image on a laptop CPU) | server (slightly sharper, ~20x slower)
+    OCR_RAPID_MODEL = os.getenv("OCR_RAPID_MODEL", "mobile").strip().lower()
+    # Read Hindi (Devanagari) regions with the Devanagari model instead of dropping them
+    OCR_HINDI = _bool("OCR_HINDI", True)
     TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")
+    OCR_PADDLE_DET_MODEL = os.getenv("OCR_PADDLE_DET_MODEL", "PP-OCRv5_server_det")
+    OCR_PADDLE_REC_MODEL = os.getenv("OCR_PADDLE_REC_MODEL", "PP-OCRv5_server_rec")
+    # Read the image plus OpenCV versions of it (contrast, sharpened, enlarged) and keep, region by region,
+    # the most confident reading.
+    OCR_ENHANCE = _bool("OCR_ENHANCE", True)
+    OCR_MAX_PASSES = max(1, min(4, _int("OCR_MAX_PASSES", 1)))
+    OCR_GOOD_CONFIDENCE = float(os.getenv("OCR_GOOD_CONFIDENCE", "0.95"))
 
     WORKERS = _int("WORKERS", 2)
     EXPIRING_SOON_DAYS = _int("EXPIRING_SOON_DAYS", 30)
